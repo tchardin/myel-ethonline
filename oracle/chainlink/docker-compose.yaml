@@ -1,0 +1,28 @@
+version: "3.8"
+services:
+  postgresdb:
+    image: postgres
+    ports:
+      - "5432:5432"
+    environment:
+     - POSTGRES_USER=chainlinkuser
+     - POSTGRES_PASSWORD=squidtimeisdelicious
+     - POSTGRES_DB=chainlink
+  chainlink-dev:
+    image: smartcontract/chainlink
+    build:
+      context: .
+    command: ["local", "n", "-p", "/chainlink/chainlink.pwd", "-a", "/chainlink/api.pwd"]
+    environment:
+      - "ETH_URL=ws://${HOST_IP}:7545"
+    ports:
+      - "6688:6688"
+    env_file:
+     - ../chainlink/chainlink-dev.env
+     - ../truffle/build/addrs.env
+    depends_on:
+      - postgresdb
+    links:
+      - postgresdb
+    volumes:
+      - ../chainlink:/chainlink

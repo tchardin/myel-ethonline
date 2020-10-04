@@ -1,0 +1,6 @@
+truffle/build/
+chainlink/root/
+node_modules/
+.env
+*.DS_Store
+.DS_Store
