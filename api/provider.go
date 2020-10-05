@@ -8,9 +8,6 @@ import (
 	versioning "github.com/filecoin-project/go-ds-versioning/pkg"
 	"github.com/filecoin-project/go-fil-markets/retrievalmarket"
 	"github.com/filecoin-project/go-fil-markets/retrievalmarket/impl/askstore"
-	"github.com/filecoin-project/go-fil-markets/retrievalmarket/impl/dtutils"
-	"github.com/filecoin-project/go-fil-markets/retrievalmarket/impl/providerstates"
-	rmnet "github.com/filecoin-project/go-fil-markets/retrievalmarket/network"
 	"github.com/filecoin-project/go-fil-markets/shared"
 	"github.com/filecoin-project/go-multistore"
 	"github.com/filecoin-project/go-state-types/abi"
@@ -23,16 +20,35 @@ import (
 	"github.com/ipfs/go-datastore/namespace"
 )
 
+// RetrievalProvider is an interface by which a provider configures their
+// retrieval operations and monitors deals received and process
+type RetrievalProvider interface {
+	// Start begins listening for deals on the given host
+	Start(ctx context.Context) error
+
+	// OnReady registers a listener for when the provider comes on line
+	OnReady(shared.ReadyFunc)
+
+	// Stop stops handling incoming requests
+	Stop() error
+
+	// SetAsk sets the retrieval payment parameters that this miner will accept
+	SetAsk(ask *Ask)
+
+	// GetAsk returns the retrieval providers pricing information
+	GetAsk() *Ask
+
+	// SubscribeToEvents listens for events that happen related to client retrievals
+	SubscribeToEvents(subscriber ProviderSubscriber) Unsubscribe
+
+	ListDeals() map[ProviderDealIdentifier]ProviderDealState
+}
+
 // RetrievalProviderNode are the node depedencies for a RetrevalProvider
 // It is based on lotus RetrievalProviderNode but changed not to rely on miner infra
 type RetrievalProviderNode interface {
 	GetChainHead(ctx context.Context) (shared.TipSetToken, abi.ChainEpoch, error)
 	SavePaymentVoucher(ctx context.Context, paymentChannel address.Address, voucher *paych.SignedVoucher, proof []byte, expectedAmount abi.TokenAmount, tok shared.TipSetToken) (abi.TokenAmount, error)
-
-	// returns the worker address associated with a miner, we probably don't need it
-	// GetMinerWorkerAddress(ctx context.Context, miner address.Address, tok shared.TipSetToken) (address.Address, error)
-	// UnsealSector call is replaced to a call to directly read the bytes
-	// UnsealSector(ctx context.Context, sectorID abi.SectorNumber, offset abi.UnpaddedPieceSize, length abi.UnpaddedPieceSize) (io.ReadCloser, error)
 }
 
 type retrievalProviderNode struct {
@@ -65,23 +81,30 @@ type RetrievalProviderOption func(p *Provider)
 // DealDecider is a function that makes a decision about whether to accept a deal
 type DealDecider func(ctx context.Context, state retrievalmarket.ProviderDealState) (bool, string, error)
 
+// ProviderSubscriber is a callback that is registered to listen for retrieval events on a provider
+type ProviderSubscriber func(event ProviderEvent, state ProviderDealState)
+
+// Unsubscribe is a function that unsubscribes a subscriber for either the
+// client or the provider
+type Unsubscribe func()
+
 type Provider struct {
 	multiStore       *multistore.MultiStore
 	dataTransfer     datatransfer.Manager
 	node             RetrievalProviderNode
-	network          rmnet.RetrievalMarketNetwork
+	network          RetrievalMarketNetwork
 	requestValidator *ProviderRequestValidator
 	revalidator      *ProviderRevalidator
-	minerAddress     address.Address
-	readySub         *pubsub.PubSub
-	subscribers      *pubsub.PubSub
-	stateMachines    fsm.Group
-	dealDecider      DealDecider
-	askStore         retrievalmarket.AskStore
+	// minerAddress     address.Address
+	readySub      *pubsub.PubSub
+	subscribers   *pubsub.PubSub
+	stateMachines fsm.Group
+	dealDecider   DealDecider
+	askStore      retrievalmarket.AskStore
 }
 type internalProviderEvent struct {
-	evt   retrievalmarket.ProviderEvent
-	state retrievalmarket.ProviderDealState
+	evt   ProviderEvent
+	state ProviderDealState
 }
 
 func providerDispatcher(evt pubsub.Event, subscriberFn pubsub.SubscriberFn) error {
@@ -89,7 +112,7 @@ func providerDispatcher(evt pubsub.Event, subscriberFn pubsub.SubscriberFn) erro
 	if !ok {
 		return fmt.Errorf("wrong type of event")
 	}
-	cb, ok := subscriberFn.(retrievalmarket.ProviderSubscriber)
+	cb, ok := subscriberFn.(ProviderSubscriber)
 	if !ok {
 		return fmt.Errorf("wrong type of event")
 	}
@@ -97,15 +120,21 @@ func providerDispatcher(evt pubsub.Event, subscriberFn pubsub.SubscriberFn) erro
 	return nil
 }
 
-func NewProvider(minerAddress address.Address, node RetrievalProviderNode, network rmnet.RetrievalMarketNetwork, multiStore *multistore.MultiStore, dataTransfer datatransfer.Manager, ds datastore.Batching, opts ...RetrievalProviderOption) (retrievalmarket.RetrievalProvider, error) {
+func NewProvider(node RetrievalProviderNode,
+	network RetrievalMarketNetwork,
+	multiStore *multistore.MultiStore,
+	dataTransfer datatransfer.Manager,
+	ds datastore.Batching,
+	opts ...RetrievalProviderOption,
+) (RetrievalProvider, error) {
 	p := &Provider{
 		multiStore:   multiStore,
 		dataTransfer: dataTransfer,
 		node:         node,
 		network:      network,
-		minerAddress: minerAddress,
-		subscribers:  pubsub.New(providerDispatcher),
-		readySub:     pubsub.New(shared.ReadyDispatcher),
+		// minerAddress: minerAddress,
+		subscribers: pubsub.New(providerDispatcher),
+		readySub:    pubsub.New(shared.ReadyDispatcher),
 	}
 
 	askStore, err := askstore.NewAskStore(namespace.Wrap(ds, datastore.NewKey("retrieval-ask")), datastore.NewKey("latest"))
@@ -115,15 +144,15 @@ func NewProvider(minerAddress address.Address, node RetrievalProviderNode, netwo
 	p.askStore = askStore
 	p.stateMachines, err = fsm.New(namespace.Wrap(ds, datastore.NewKey(string(versioning.VersionKey("1")))), fsm.Parameters{
 		Environment:     &providerDealEnvironment{p},
-		StateType:       retrievalmarket.ProviderDealState{},
+		StateType:       ProviderDealState{},
 		StateKeyField:   "Status",
-		Events:          providerstates.ProviderEvents,
-		StateEntryFuncs: providerstates.ProviderStateEntryFuncs,
-		FinalityStates:  providerstates.ProviderFinalityStates,
+		Events:          FsmProviderEvents,
+		StateEntryFuncs: ProviderStateEntryFuncs,
+		FinalityStates:  ProviderFinalityStates,
 		Notifier:        p.notifySubscribers,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Unable to create state machine: %v", err)
 	}
 	p.Configure(opts...)
 	p.requestValidator = NewProviderRequestValidator(&providerValidationEnvironment{p})
@@ -141,7 +170,7 @@ func NewProvider(minerAddress address.Address, node RetrievalProviderNode, netwo
 	if err != nil {
 		return nil, err
 	}
-	transportConfigurer := dtutils.TransportConfigurer(network.ID(), &providerStoreGetter{p})
+	transportConfigurer := TransportConfigurer(network.ID(), &providerStoreGetter{p})
 	err = p.dataTransfer.RegisterTransportConfigurer(&retrievalmarket.DealProposal{}, transportConfigurer)
 	if err != nil {
 		return nil, err
@@ -180,34 +209,35 @@ func (p *Provider) OnReady(ready shared.ReadyFunc) {
 }
 
 func (p *Provider) notifySubscribers(eventName fsm.EventName, state fsm.StateType) {
-	evt := eventName.(retrievalmarket.ProviderEvent)
-	ds := state.(retrievalmarket.ProviderDealState)
+	evt := eventName.(ProviderEvent)
+	ds := state.(ProviderDealState)
 	_ = p.subscribers.Publish(internalProviderEvent{evt, ds})
 }
 
 // SubscribeToEvents listens for events that happen related to client retrievals
-func (p *Provider) SubscribeToEvents(subscriber retrievalmarket.ProviderSubscriber) retrievalmarket.Unsubscribe {
-	return retrievalmarket.Unsubscribe(p.subscribers.Subscribe(subscriber))
+func (p *Provider) SubscribeToEvents(subscriber ProviderSubscriber) Unsubscribe {
+	return Unsubscribe(p.subscribers.Subscribe(subscriber))
 }
 
 // GetAsk returns the current deal parameters this provider accepts
-func (p *Provider) GetAsk() *retrievalmarket.Ask {
-	return p.askStore.GetAsk()
+func (p *Provider) GetAsk() *Ask {
+	// return p.askStore.GetAsk()
+	return nil
 }
 
 // SetAsk sets the deal parameters this provider accepts
-func (p *Provider) SetAsk(ask *retrievalmarket.Ask) {
-	err := p.askStore.SetAsk(ask)
+func (p *Provider) SetAsk(ask *Ask) {
+	// err := p.askStore.SetAsk(ask)
 
-	if err != nil {
-		fmt.Printf("Error setting retrieval ask: %w", err)
-	}
+	// if err != nil {
+	// 	fmt.Printf("Error setting retrieval ask: %w", err)
+	// }
 }
 
 // ListDeals lists all known retrieval deals
-func (p *Provider) ListDeals() map[retrievalmarket.ProviderDealIdentifier]retrievalmarket.ProviderDealState {
+func (p *Provider) ListDeals() map[ProviderDealIdentifier]ProviderDealState {
 	// TODO
-	dealMap := make(map[retrievalmarket.ProviderDealIdentifier]retrievalmarket.ProviderDealState)
+	dealMap := make(map[ProviderDealIdentifier]ProviderDealState)
 	return dealMap
 }
 
@@ -220,7 +250,7 @@ A Provider handling a retrieval `Query` does the following:
 4. Writes this response to the `Query` stream.
 The connection is kept open only as long as the query-response exchange.
 */
-func (p *Provider) HandleQueryStream(stream rmnet.RetrievalQueryStream) {
+func (p *Provider) HandleQueryStream(stream RetrievalQueryStream) {
 	defer stream.Close()
 	query, err := stream.ReadQuery()
 	if err != nil {
@@ -229,21 +259,18 @@ func (p *Provider) HandleQueryStream(stream rmnet.RetrievalQueryStream) {
 
 	ask := p.GetAsk()
 
-	answer := retrievalmarket.QueryResponse{
-		Status:                     retrievalmarket.QueryResponseUnavailable,
-		PieceCIDFound:              retrievalmarket.QueryItemUnavailable,
+	answer := QueryResponse{
+		Status:                     QueryResponseUnavailable,
 		MinPricePerByte:            ask.PricePerByte,
 		MaxPaymentInterval:         ask.PaymentInterval,
 		MaxPaymentIntervalIncrease: ask.PaymentIntervalIncrease,
-		UnsealPrice:                ask.UnsealPrice,
 	}
 	// TODO: check if cid is available in our store
 	cid := query.PayloadCID
 	itemAvailable, err := checkCID(cid)
 	if err == nil && itemAvailable {
-		answer.Status = retrievalmarket.QueryResponseAvailable
+		answer.Status = QueryResponseAvailable
 		// TODO answer.Size = uint64(pieceInfo.Deals[0].Length)
-		answer.PieceCIDFound = retrievalmarket.QueryItemAvailable
 	}
 
 	if err := stream.WriteQueryResponse(answer); err != nil {

@@ -42,7 +42,7 @@ func main() {
 
 	err = SpawnFilecoinNode()
 	if err != nil {
-		fmt.Printf("Unable to spawn Filecoin node: %v", err)
+		fmt.Printf("Unable to spawn Filecoin node: %v\r\n", C.GoString(err))
 	}
 
 	stop := make(chan os.Signal, 1)

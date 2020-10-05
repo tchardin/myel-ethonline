@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	datatransfer "github.com/filecoin-project/go-data-transfer"
-	rm "github.com/filecoin-project/go-fil-markets/retrievalmarket"
 	"github.com/filecoin-project/go-multistore"
 	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/big"
@@ -21,9 +20,9 @@ type ValidationEnvironment interface {
 	// CheckDealParams verifies the given deal params are acceptable
 	CheckDealParams(pricePerByte abi.TokenAmount, paymentInterval uint64, paymentIntervalIncrease uint64, unsealPrice abi.TokenAmount) error
 	// RunDealDecisioningLogic runs custom deal decision logic to decide if a deal is accepted, if present
-	RunDealDecisioningLogic(ctx context.Context, state rm.ProviderDealState) (bool, string, error)
+	RunDealDecisioningLogic(ctx context.Context, state ProviderDealState) (bool, string, error)
 	// StateMachines returns the FSM Group to begin tracking with
-	BeginTracking(pds rm.ProviderDealState) error
+	BeginTracking(pds ProviderDealState) error
 	// NextStoreID allocates a store for this deal
 	NextStoreID() (multistore.StoreID, error)
 }
@@ -45,16 +44,16 @@ func (rv *ProviderRequestValidator) ValidatePush(sender peer.ID, voucher datatra
 
 // ValidatePull validates a pull request received from the peer that will receive data
 func (rv *ProviderRequestValidator) ValidatePull(receiver peer.ID, voucher datatransfer.Voucher, baseCid cid.Cid, selector ipld.Node) (datatransfer.VoucherResult, error) {
-	proposal, ok := voucher.(*rm.DealProposal)
+	proposal, ok := voucher.(*DealProposal)
 	if !ok {
 		return nil, fmt.Errorf("Wrong voucher type")
 	}
 	if proposal.PayloadCID != baseCid {
 		return nil, fmt.Errorf("Incorrect CID for this proposal")
 	}
-	response := rm.DealResponse{
+	response := DealResponse{
 		ID:     proposal.ID,
-		Status: rm.DealStatusAccepted,
+		Status: DealStatusAccepted,
 	}
 	return &response, nil
 }
@@ -63,12 +62,12 @@ func (rv *ProviderRequestValidator) ValidatePull(receiver peer.ID, voucher datat
 // build the logic of revalidation -- essentially, access to the node at statemachines
 type RevalidatorEnvironment interface {
 	Node() RetrievalProviderNode
-	SendEvent(dealID rm.ProviderDealIdentifier, evt rm.ProviderEvent, args ...interface{}) error
-	Get(dealID rm.ProviderDealIdentifier) (rm.ProviderDealState, error)
+	SendEvent(dealID ProviderDealIdentifier, evt ProviderEvent, args ...interface{}) error
+	Get(dealID ProviderDealIdentifier) (ProviderDealState, error)
 }
 
 type channelData struct {
-	dealID       rm.ProviderDealIdentifier
+	dealID       ProviderDealIdentifier
 	totalSent    uint64
 	totalPaidFor uint64
 	interval     uint64
@@ -95,7 +94,7 @@ func NewProviderRevalidator(env RevalidatorEnvironment) *ProviderRevalidator {
 // TrackChannel indicates a retrieval deal tracked by this provider. It associates
 // a given channel ID with a retrieval deal, so that checks run for data sent
 // on the channel
-func (pr *ProviderRevalidator) TrackChannel(deal rm.ProviderDealState) {
+func (pr *ProviderRevalidator) TrackChannel(deal ProviderDealState) {
 	pr.trackedChannelsLk.Lock()
 	defer pr.trackedChannelsLk.Unlock()
 	pr.trackedChannels[deal.ChannelID] = &channelData{
@@ -106,7 +105,7 @@ func (pr *ProviderRevalidator) TrackChannel(deal rm.ProviderDealState) {
 
 // UntrackChannel indicates a retrieval deal is finish and no longer is tracked
 // by this provider
-func (pr *ProviderRevalidator) UntrackChannel(deal rm.ProviderDealState) {
+func (pr *ProviderRevalidator) UntrackChannel(deal ProviderDealState) {
 	pr.trackedChannelsLk.Lock()
 	defer pr.trackedChannelsLk.Unlock()
 	delete(pr.trackedChannels, deal.ChannelID)
@@ -125,10 +124,10 @@ func (pr *ProviderRevalidator) loadDealState(channel *channelData) error {
 	return nil
 }
 
-func (pr *ProviderRevalidator) writeDealState(deal rm.ProviderDealState) {
+func (pr *ProviderRevalidator) writeDealState(deal ProviderDealState) {
 	channel := pr.trackedChannels[deal.ChannelID]
 	channel.totalSent = deal.TotalSent
-	channel.totalPaidFor = big.Div(big.Max(big.Sub(deal.FundsReceived, deal.UnsealPrice), big.Zero()), deal.PricePerByte).Uint64()
+	channel.totalPaidFor = big.Div(big.Max(deal.FundsReceived, big.Zero()), deal.PricePerByte).Uint64()
 	channel.interval = deal.CurrentInterval
 	channel.pricePerByte = deal.PricePerByte
 }
@@ -143,7 +142,7 @@ func (pr *ProviderRevalidator) Revalidate(channelID datatransfer.ChannelID, vouc
 	}
 
 	// read payment, or fail
-	payment, ok := voucher.(*rm.DealPayment)
+	payment, ok := voucher.(*DealPayment)
 	if !ok {
 		return nil, fmt.Errorf("wrong voucher type")
 	}
@@ -154,11 +153,11 @@ func (pr *ProviderRevalidator) Revalidate(channelID datatransfer.ChannelID, vouc
 	return response, err
 }
 
-func (pr *ProviderRevalidator) processPayment(dealID rm.ProviderDealIdentifier, payment *rm.DealPayment) (*rm.DealResponse, error) {
+func (pr *ProviderRevalidator) processPayment(dealID ProviderDealIdentifier, payment *DealPayment) (*DealResponse, error) {
 
 	tok, _, err := pr.env.Node().GetChainHead(context.TODO())
 	if err != nil {
-		_ = pr.env.SendEvent(dealID, rm.ProviderEventSaveVoucherFailed, err)
+		_ = pr.env.SendEvent(dealID, ProviderEventSaveVoucherFailed, err)
 		return errorDealResponse(dealID, err), err
 	}
 
@@ -169,10 +168,10 @@ func (pr *ProviderRevalidator) processPayment(dealID rm.ProviderDealIdentifier, 
 
 	// attempt to redeem voucher
 	// (totalSent * pricePerByte + unsealPrice) - fundsReceived
-	paymentOwed := big.Sub(big.Add(big.Mul(abi.NewTokenAmount(int64(deal.TotalSent)), deal.PricePerByte), deal.UnsealPrice), deal.FundsReceived)
+	paymentOwed := big.Sub(big.Mul(abi.NewTokenAmount(int64(deal.TotalSent)), deal.PricePerByte), deal.FundsReceived)
 	received, err := pr.env.Node().SavePaymentVoucher(context.TODO(), payment.PaymentChannel, payment.PaymentVoucher, nil, paymentOwed, tok)
 	if err != nil {
-		_ = pr.env.SendEvent(dealID, rm.ProviderEventSaveVoucherFailed, err)
+		_ = pr.env.SendEvent(dealID, ProviderEventSaveVoucherFailed, err)
 		return errorDealResponse(dealID, err), err
 	}
 
@@ -185,8 +184,8 @@ func (pr *ProviderRevalidator) processPayment(dealID rm.ProviderDealIdentifier, 
 
 	// check if all payments are received to continue the deal, or send updated required payment
 	if received.LessThan(paymentOwed) {
-		_ = pr.env.SendEvent(dealID, rm.ProviderEventPartialPaymentReceived, received)
-		return &rm.DealResponse{
+		_ = pr.env.SendEvent(dealID, ProviderEventPartialPaymentReceived, received)
+		return &DealResponse{
 			ID:          deal.ID,
 			Status:      deal.Status,
 			PaymentOwed: big.Sub(paymentOwed, received),
@@ -194,21 +193,21 @@ func (pr *ProviderRevalidator) processPayment(dealID rm.ProviderDealIdentifier, 
 	}
 
 	// resume deal
-	_ = pr.env.SendEvent(dealID, rm.ProviderEventPaymentReceived, received)
-	if deal.Status == rm.DealStatusFundsNeededLastPayment {
-		return &rm.DealResponse{
+	_ = pr.env.SendEvent(dealID, ProviderEventPaymentReceived, received)
+	if deal.Status == DealStatusFundsNeededLastPayment {
+		return &DealResponse{
 			ID:     deal.ID,
-			Status: rm.DealStatusCompleted,
+			Status: DealStatusCompleted,
 		}, nil
 	}
 	return nil, nil
 }
 
-func errorDealResponse(dealID rm.ProviderDealIdentifier, err error) *rm.DealResponse {
-	return &rm.DealResponse{
+func errorDealResponse(dealID ProviderDealIdentifier, err error) *DealResponse {
+	return &DealResponse{
 		ID:      dealID.DealID,
 		Message: err.Error(),
-		Status:  rm.DealStatusErrored,
+		Status:  DealStatusErrored,
 	}
 }
 
@@ -232,17 +231,17 @@ func (pr *ProviderRevalidator) OnPullDataSent(chid datatransfer.ChannelID, addit
 	channel.totalSent += additionalBytesSent
 	if channel.totalSent-channel.totalPaidFor >= channel.interval {
 		paymentOwed := big.Mul(abi.NewTokenAmount(int64(channel.totalSent-channel.totalPaidFor)), channel.pricePerByte)
-		err := pr.env.SendEvent(channel.dealID, rm.ProviderEventPaymentRequested, channel.totalSent)
+		err := pr.env.SendEvent(channel.dealID, ProviderEventPaymentRequested, channel.totalSent)
 		if err != nil {
 			return true, nil, err
 		}
-		return true, &rm.DealResponse{
+		return true, &DealResponse{
 			ID:          channel.dealID.DealID,
-			Status:      rm.DealStatusFundsNeeded,
+			Status:      DealStatusFundsNeeded,
 			PaymentOwed: paymentOwed,
 		}, datatransfer.ErrPause
 	}
-	return true, nil, pr.env.SendEvent(channel.dealID, rm.ProviderEventBlockSent, channel.totalSent)
+	return true, nil, pr.env.SendEvent(channel.dealID, ProviderEventBlockSent, channel.totalSent)
 }
 
 // OnPushDataReceived is called on the responder side when more bytes are received
@@ -270,25 +269,25 @@ func (pr *ProviderRevalidator) OnComplete(chid datatransfer.ChannelID) (bool, da
 		return true, nil, err
 	}
 
-	err = pr.env.SendEvent(channel.dealID, rm.ProviderEventBlocksCompleted)
+	err = pr.env.SendEvent(channel.dealID, ProviderEventBlocksCompleted)
 	if err != nil {
 		return true, nil, err
 	}
 
 	paymentOwed := big.Mul(abi.NewTokenAmount(int64(channel.totalSent-channel.totalPaidFor)), channel.pricePerByte)
 	if paymentOwed.Equals(big.Zero()) {
-		return true, &rm.DealResponse{
+		return true, &DealResponse{
 			ID:     channel.dealID.DealID,
-			Status: rm.DealStatusCompleted,
+			Status: DealStatusCompleted,
 		}, nil
 	}
-	err = pr.env.SendEvent(channel.dealID, rm.ProviderEventPaymentRequested, channel.totalSent)
+	err = pr.env.SendEvent(channel.dealID, ProviderEventPaymentRequested, channel.totalSent)
 	if err != nil {
 		return true, nil, err
 	}
-	return true, &rm.DealResponse{
+	return true, &DealResponse{
 		ID:          channel.dealID.DealID,
-		Status:      rm.DealStatusFundsNeededLastPayment,
+		Status:      DealStatusFundsNeededLastPayment,
 		PaymentOwed: paymentOwed,
 	}, datatransfer.ErrPause
 }

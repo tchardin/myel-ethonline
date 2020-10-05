@@ -14,6 +14,7 @@ import (
 	"github.com/filecoin-project/go-storedcounter"
 	"github.com/filecoin-project/lotus/api/client"
 	"github.com/ipfs/go-datastore"
+	"github.com/ipfs/go-datastore/namespace"
 	graphsync "github.com/ipfs/go-graphsync/impl"
 	gsnet "github.com/ipfs/go-graphsync/network"
 	storeutil "github.com/ipfs/go-graphsync/storeutil"
@@ -36,8 +37,7 @@ func NewDataTransfer(host host.Host, ds datastore.Batching) (datatransfer.Manage
 	// Build transport interface
 	tp := gstransport.NewTransport(host.ID(), exchange)
 	// A counter that persists to the datastore as it increments
-	// not sure exactly what it's for but required by NewDataTransfer method
-	key := datastore.NewKey("counter")
+	key := datastore.NewKey("/retrieval/counter")
 	storedCounter := storedcounter.New(ds, key)
 	// Finally we initialize the new instance of data transfer manager
 	return dtfimpl.NewDataTransfer(ds, dtNet, tp, storedCounter)
@@ -47,6 +47,7 @@ func mockProvider(node RetrievalProviderNode, network rmnet.RetrievalMarketNetwo
 }
 
 func SpawnFilecoinNode() *C.char {
+	// ctx is a global variable here
 	nodeApi, ncloser, err := client.NewFullNodeRPC(ctx, "ws://localhost:1234/rpc/v0", http.Header{})
 	if err != nil {
 		return C.CString(fmt.Sprintf("Unable to create Lotus RPC client: %v", err))
@@ -54,7 +55,7 @@ func SpawnFilecoinNode() *C.char {
 	defer ncloser()
 
 	radapter := NewRetrievalProviderNode(nodeApi)
-	netwk := rmnet.NewFromLibp2pHost(inode.PeerHost)
+	netwk := NewFromLibp2pHost(inode.PeerHost)
 	ds := inode.Repo.Datastore()
 	multiDs, err := multistore.NewMultiDstore(ds)
 	if err != nil {
@@ -64,7 +65,13 @@ func SpawnFilecoinNode() *C.char {
 	if err != nil {
 		return C.CString(fmt.Sprintf("Unable to create graphsync data transfer: %v", err))
 	}
-	// TODO: We need an address for the miner, or do we?
-	mockProvider(radapter, netwk, multiDs, dataTransfer, ds)
+	// Create a new namespace for our metadata store
+	nds := namespace.Wrap(ds, datastore.NewKey("/retrievals/provider"))
+	// TODO: We need an address for the miner
+	p, err := NewProvider(radapter, netwk, multiDs, dataTransfer, nds)
+	if err != nil {
+		return C.CString(fmt.Sprintf("Unable to create new provider: %v", err))
+	}
+	p.Start(ctx)
 	return nil
 }
