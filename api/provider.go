@@ -7,7 +7,6 @@ import (
 	datatransfer "github.com/filecoin-project/go-data-transfer"
 	versioning "github.com/filecoin-project/go-ds-versioning/pkg"
 	"github.com/filecoin-project/go-fil-markets/retrievalmarket"
-	"github.com/filecoin-project/go-fil-markets/retrievalmarket/impl/askstore"
 	"github.com/filecoin-project/go-fil-markets/shared"
 	"github.com/filecoin-project/go-multistore"
 	"github.com/filecoin-project/go-state-types/abi"
@@ -100,7 +99,7 @@ type Provider struct {
 	subscribers   *pubsub.PubSub
 	stateMachines fsm.Group
 	dealDecider   DealDecider
-	askStore      retrievalmarket.AskStore
+	askStore      AskStore
 }
 type internalProviderEvent struct {
 	evt   ProviderEvent
@@ -137,7 +136,7 @@ func NewProvider(node RetrievalProviderNode,
 		readySub:    pubsub.New(shared.ReadyDispatcher),
 	}
 
-	askStore, err := askstore.NewAskStore(namespace.Wrap(ds, datastore.NewKey("retrieval-ask")), datastore.NewKey("latest"))
+	askStore, err := NewAskStore(namespace.Wrap(ds, datastore.NewKey("retrieval-ask")), datastore.NewKey("latest"))
 	if err != nil {
 		return nil, err
 	}
@@ -221,17 +220,16 @@ func (p *Provider) SubscribeToEvents(subscriber ProviderSubscriber) Unsubscribe 
 
 // GetAsk returns the current deal parameters this provider accepts
 func (p *Provider) GetAsk() *Ask {
-	// return p.askStore.GetAsk()
-	return nil
+	return p.askStore.GetAsk()
 }
 
 // SetAsk sets the deal parameters this provider accepts
 func (p *Provider) SetAsk(ask *Ask) {
-	// err := p.askStore.SetAsk(ask)
+	err := p.askStore.SetAsk(ask)
 
-	// if err != nil {
-	// 	fmt.Printf("Error setting retrieval ask: %w", err)
-	// }
+	if err != nil {
+		fmt.Printf("Error setting retrieval ask: %w", err)
+	}
 }
 
 // ListDeals lists all known retrieval deals
