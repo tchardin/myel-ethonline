@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-jsonrpc"
 	"github.com/filecoin-project/go-multistore"
 	"github.com/filecoin-project/go-storedcounter"
@@ -27,15 +28,16 @@ const (
 )
 
 type MyelNode struct {
-	ipfs     *ipfsNode
-	client   RetrievalClient
-	provider RetrievalProvider
+	Ctx      context.Context
+	Ipfs     *ipfsNode
+	Client   RetrievalClient
+	Provider RetrievalProvider
 	lcloser  jsonrpc.ClientCloser
 }
 
 func (mn *MyelNode) Close() {
 	mn.lcloser()
-	mn.ipfs.node.Close()
+	mn.Ipfs.node.Close()
 }
 
 func SpawnNode(nt NodeType) (*MyelNode, error) {
@@ -53,7 +55,8 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 		return nil, fmt.Errorf("Unable to start ipfs node: %v", err)
 	}
 	node := &MyelNode{
-		ipfs:    ipfs,
+		Ctx:     ctx,
+		Ipfs:    ipfs,
 		lcloser: lcloser,
 	}
 	// Create a retrieval network protocol from the ipfs node libp2p host
@@ -79,7 +82,7 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 		if err != nil {
 			return nil, fmt.Errorf("Unable to create new retrieval client: %v", err)
 		}
-		node.client = client
+		node.Client = client
 
 		err = client.Start(ctx)
 		if err != nil {
@@ -88,11 +91,12 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 	}
 	if nt == NodeTypeProvider || nt == NodeTypeFull {
 		pds := namespace.Wrap(ds, datastore.NewKey("/retrieval/provider"))
-		provider, err := NewProvider(radapter, net, multiDs, dataTransfer, pds)
+		testAddress := address.TestAddress
+		provider, err := NewProvider(testAddress, radapter, net, multiDs, dataTransfer, pds)
 		if err != nil {
 			return nil, fmt.Errorf("Unable to create new retrieval provider: %v", err)
 		}
-		node.provider = provider
+		node.Provider = provider
 
 		err = provider.Start(ctx)
 		if err != nil {

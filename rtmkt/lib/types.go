@@ -230,7 +230,7 @@ type ChannelAvailableFunds struct {
 // deals for with a miner)
 type RetrievalPeer struct {
 	Address  address.Address
-	ID       peer.ID // optional
+	ID       peer.ID
 	PieceCID *cid.Cid
 }
 

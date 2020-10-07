@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/filecoin-project/go-address"
 	datatransfer "github.com/filecoin-project/go-data-transfer"
 	versioning "github.com/filecoin-project/go-ds-versioning/pkg"
 	"github.com/filecoin-project/go-multistore"
@@ -52,8 +53,8 @@ type Provider struct {
 	requestValidator *ProviderRequestValidator
 	revalidator      *ProviderRevalidator
 
-	// minerAddress     address.Address
-	subscribers *pubsub.PubSub
+	minerAddress address.Address
+	subscribers  *pubsub.PubSub
 
 	stateMachines fsm.Group
 	dealDecider   DealDecider
@@ -77,7 +78,9 @@ func providerDispatcher(evt pubsub.Event, subscriberFn pubsub.SubscriberFn) erro
 	return nil
 }
 
-func NewProvider(node RetrievalNode,
+func NewProvider(
+	minerAddress address.Address,
+	node RetrievalNode,
 	network RetrievalMarketNetwork,
 	multiStore *multistore.MultiStore,
 	dataTransfer datatransfer.Manager,
@@ -88,8 +91,8 @@ func NewProvider(node RetrievalNode,
 		dataTransfer: dataTransfer,
 		node:         node,
 		network:      network,
-		// minerAddress: minerAddress,
-		subscribers: pubsub.New(providerDispatcher),
+		minerAddress: minerAddress,
+		subscribers:  pubsub.New(providerDispatcher),
 	}
 
 	askStore, err := NewAskStore(namespace.Wrap(ds, datastore.NewKey("retrieval-ask")), datastore.NewKey("latest"))
@@ -166,7 +169,7 @@ func (p *Provider) SetAsk(ask *Ask) {
 	err := p.askStore.SetAsk(ask)
 
 	if err != nil {
-		fmt.Printf("Error setting retrieval ask: %w", err)
+		fmt.Printf("Error setting retrieval ask: %v", err)
 	}
 }
 
@@ -201,6 +204,7 @@ func (p *Provider) HandleQueryStream(stream RetrievalQueryStream) {
 
 	answer := QueryResponse{
 		Status:                     QueryResponseUnavailable,
+		PaymentAddress:             p.minerAddress,
 		MinPricePerByte:            ask.PricePerByte,
 		MaxPaymentInterval:         ask.PaymentInterval,
 		MaxPaymentIntervalIncrease: ask.PaymentIntervalIncrease,

@@ -171,11 +171,11 @@ The client creates a new `RetrievalQueryStream` for the chosen peer ID,
 and calls `WriteQuery` on it, which constructs a data-transfer message and writes it to the Query stream.
 */
 func (c *Client) Query(ctx context.Context, p RetrievalPeer, payloadCID cid.Cid, params QueryParams) (QueryResponse, error) {
-	err := c.addMultiaddrs(ctx, p)
-	if err != nil {
-		fmt.Printf("Error adding multi address: %v\n", err)
-		return QueryResponseUndefined, err
-	}
+	// err := c.addMultiaddrs(ctx, p)
+	// if err != nil {
+	// 	fmt.Printf("Error adding multi address: %v\n", err)
+	// 	return QueryResponseUndefined, err
+	// }
 	s, err := c.network.NewQueryStream(p.ID)
 	if err != nil {
 		fmt.Printf("Unable to create QueryStream: %v\n", err)
@@ -214,10 +214,10 @@ From then on, the statemachine controls the deal flow in the client. Other compo
 Documentation of the client state machine can be found at https://godoc.org/github.com/filecoin-project/go-fil-markets/retrievalmarket/impl/clientstates
 */
 func (c *Client) Retrieve(ctx context.Context, payloadCID cid.Cid, params Params, totalFunds abi.TokenAmount, p RetrievalPeer, clientWallet address.Address, minerWallet address.Address, storeID *multistore.StoreID) (DealID, error) {
-	err := c.addMultiaddrs(ctx, p)
-	if err != nil {
-		return 0, err
-	}
+	// err := c.addMultiaddrs(ctx, p)
+	// if err != nil {
+	// 	return 0, err
+	// }
 	next, err := c.storedCounter.Next()
 	if err != nil {
 		return 0, err

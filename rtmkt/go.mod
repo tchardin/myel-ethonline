@@ -32,6 +32,7 @@ require (
 	github.com/libp2p/go-libp2p-peer v0.2.0
 	github.com/libp2p/go-libp2p-peerstore v0.2.6
 	github.com/multiformats/go-multiaddr v0.3.1
+	github.com/rs/zerolog v1.20.0
 	github.com/whyrusleeping/cbor-gen v0.0.0-20200826160007-0b9f6c5fb163
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1
 )

@@ -17,7 +17,7 @@ type providerValidationEnvironment struct {
 }
 
 // CheckDealParams verifies the given deal params are acceptable
-func (pve *providerValidationEnvironment) CheckDealParams(pricePerByte abi.TokenAmount, paymentInterval uint64, paymentIntervalIncrease uint64, unsealPrice abi.TokenAmount) error {
+func (pve *providerValidationEnvironment) CheckDealParams(pricePerByte abi.TokenAmount, paymentInterval uint64, paymentIntervalIncrease uint64) error {
 	ask := pve.p.GetAsk()
 	if pricePerByte.LessThan(ask.PricePerByte) {
 		return fmt.Errorf("Price per byte too low")
@@ -33,7 +33,10 @@ func (pve *providerValidationEnvironment) CheckDealParams(pricePerByte abi.Token
 
 // RunDealDecisioningLogic runs custom deal decision logic to decide if a deal is accepted, if present
 func (pve *providerValidationEnvironment) RunDealDecisioningLogic(ctx context.Context, state ProviderDealState) (bool, string, error) {
-	return true, "", nil
+	if pve.p.dealDecider == nil {
+		return true, "", nil
+	}
+	return pve.p.dealDecider(ctx, state)
 }
 
 // StateMachines returns the FSM Group to begin tracking with
@@ -96,12 +99,12 @@ func (pde *providerDealEnvironment) ReadIntoBlockstore(storeID multistore.StoreI
 }
 
 func (pde *providerDealEnvironment) TrackTransfer(deal ProviderDealState) error {
-	// pde.p.revalidator.TrackChannel(deal)
+	pde.p.revalidator.TrackChannel(deal)
 	return nil
 }
 
 func (pde *providerDealEnvironment) UntrackTransfer(deal ProviderDealState) error {
-	// pde.p.revalidator.UntrackChannel(deal)
+	pde.p.revalidator.UntrackChannel(deal)
 	return nil
 }
 

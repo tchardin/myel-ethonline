@@ -18,7 +18,7 @@ import (
 type ValidationEnvironment interface {
 	// GetPiece(c cid.Cid, pieceCID *cid.Cid) (piecestore.PieceInfo, error)
 	// CheckDealParams verifies the given deal params are acceptable
-	CheckDealParams(pricePerByte abi.TokenAmount, paymentInterval uint64, paymentIntervalIncrease uint64, unsealPrice abi.TokenAmount) error
+	CheckDealParams(pricePerByte abi.TokenAmount, paymentInterval uint64, paymentIntervalIncrease uint64) error
 	// RunDealDecisioningLogic runs custom deal decision logic to decide if a deal is accepted, if present
 	RunDealDecisioningLogic(ctx context.Context, state ProviderDealState) (bool, string, error)
 	// StateMachines returns the FSM Group to begin tracking with
@@ -51,9 +51,41 @@ func (rv *ProviderRequestValidator) ValidatePull(receiver peer.ID, voucher datat
 	if proposal.PayloadCID != baseCid {
 		return nil, fmt.Errorf("Incorrect CID for this proposal")
 	}
+	pds := ProviderDealState{
+		DealProposal: *proposal,
+		Receiver:     receiver,
+	}
 	response := DealResponse{
-		ID:     proposal.ID,
-		Status: DealStatusAccepted,
+		ID: proposal.ID,
+	}
+	// check that the deal parameters match our required parameters or
+	// reject outright
+	err := rv.env.CheckDealParams(pds.PricePerByte, pds.PaymentInterval, pds.PaymentIntervalIncrease)
+	if err != nil {
+		response.Status = DealStatusRejected
+	}
+
+	accepted, reason, err := rv.env.RunDealDecisioningLogic(context.TODO(), pds)
+	if !accepted {
+		response.Status = DealStatusRejected
+		response.Message = reason
+		return &response, nil
+	}
+	if err != nil {
+		response.Status = DealStatusErrored
+		return &response, nil
+	}
+
+	pds.StoreID, err = rv.env.NextStoreID()
+	if err != nil {
+		response.Status = DealStatusErrored
+		return &response, nil
+	}
+	response.Status = DealStatusAccepted
+
+	err = rv.env.BeginTracking(pds)
+	if err != nil {
+		return nil, err
 	}
 	return &response, nil
 }

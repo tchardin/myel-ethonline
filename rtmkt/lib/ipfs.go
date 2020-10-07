@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"sync"
+	"time"
 
 	config "github.com/ipfs/go-ipfs-config"
 	files "github.com/ipfs/go-ipfs-files"
@@ -93,6 +94,12 @@ func NewIpfsNode(ctx context.Context) (*ipfsNode, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Unable to create config: %v", err)
 	}
+	// Remove the defaut bootstrap addresses
+	cfg.Bootstrap = []string{}
+	// Set Swarm listening to a random address
+	randAddr, _ := ma.NewMultiaddr("/ip4/0.0.0.0/tcp/0")
+	cfg.Addresses.Swarm = []string{randAddr.String()}
+
 	// Initialize the repo
 	err = fsrepo.Init(repoPath, cfg)
 	if err != nil {
@@ -115,8 +122,6 @@ func NewIpfsNode(ctx context.Context) (*ipfsNode, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Unable to create new ipfs node: %v", err)
 	}
-	fmt.Printf("Node id: %v\r\n", inode.Identity.String())
-
 	// Attach the core API to the constructed node
 	ipfs, err := coreapi.NewCoreAPI(inode)
 	if err != nil {
@@ -169,4 +174,18 @@ func (n *ipfsNode) AddWebFile(ctx context.Context, urlStr string) (string, error
 		return "", fmt.Errorf("Unable to add file to ipfs: %v", err)
 	}
 	return cidFile.String(), nil
+}
+
+func (n *ipfsNode) GetFirstPeer(ctx context.Context) icore.ConnectionInfo {
+	for {
+		prs, err := n.api.Swarm().Peers(ctx)
+		if err != nil {
+			fmt.Printf("Unable to list peers: %v", err)
+		}
+		if len(prs) > 0 {
+			p := prs[0]
+			return p
+		}
+		time.Sleep(5 * time.Second)
+	}
 }
