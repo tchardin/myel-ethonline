@@ -1,4 +1,4 @@
-package main
+package rtmkt
 
 import (
 	"context"
@@ -61,7 +61,7 @@ func (rv *ProviderRequestValidator) ValidatePull(receiver peer.ID, voucher datat
 // RevalidatorEnvironment are the dependencies needed to
 // build the logic of revalidation -- essentially, access to the node at statemachines
 type RevalidatorEnvironment interface {
-	Node() RetrievalProviderNode
+	Node() RetrievalNode
 	SendEvent(dealID ProviderDealIdentifier, evt ProviderEvent, args ...interface{}) error
 	Get(dealID ProviderDealIdentifier) (ProviderDealState, error)
 }

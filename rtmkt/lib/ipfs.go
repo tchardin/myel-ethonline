@@ -1,6 +1,5 @@
-package main
+package rtmkt
 
-import "C"
 import (
 	"context"
 	"fmt"
@@ -15,7 +14,6 @@ import (
 	"github.com/ipfs/go-ipfs/core/coreapi"
 	libp2p "github.com/ipfs/go-ipfs/core/node/libp2p"
 	"github.com/ipfs/go-ipfs/plugin/loader"
-	drepo "github.com/ipfs/go-ipfs/repo"
 	fsrepo "github.com/ipfs/go-ipfs/repo/fsrepo"
 	icore "github.com/ipfs/interface-go-ipfs-core"
 	icorepath "github.com/ipfs/interface-go-ipfs-core/path"
@@ -24,12 +22,10 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 )
 
-// We can't pass pointers to C runtime so we keep reference here and clean up at the end
-var ctx context.Context
-var cancel context.CancelFunc
-var repo drepo.Repo
-var inode *core.IpfsNode
-var ipfs icore.CoreAPI
+type ipfsNode struct {
+	api  icore.CoreAPI
+	node *core.IpfsNode
+}
 
 func connectToPeers(ctx context.Context, ipfs icore.CoreAPI, peers []string, coPeers chan *peerstore.PeerInfo) error {
 	var wg sync.WaitGroup
@@ -67,48 +63,45 @@ func connectToPeers(ctx context.Context, ipfs icore.CoreAPI, peers []string, coP
 	return nil
 }
 
-//export SpawnIpfsNode
-func SpawnIpfsNode() *C.char {
-	ctx, cancel = context.WithCancel(context.Background())
-
+func NewIpfsNode(ctx context.Context) (*ipfsNode, error) {
 	// ======== Temp repo ==========
 	// Load plugins if available
 	plugins, err := loader.NewPluginLoader(filepath.Join("", "plugins"))
 	if err != nil {
-		return C.CString(fmt.Sprintf("Unable to load plugins: %v", err))
+		return nil, fmt.Errorf("Unable to load plugins: %v", err)
 	}
 	// Load preloaded and external plugins
 	if err := plugins.Initialize(); err != nil {
-		return C.CString(fmt.Sprintf("Unable to initialize plugins: %v", err))
+		return nil, fmt.Errorf("Unable to initialize plugins: %v", err)
 	}
 	if err := plugins.Inject(); err != nil {
-		return C.CString(fmt.Sprintf("Unable to inject plugins: %v", err))
+		return nil, fmt.Errorf("Unable to inject plugins: %v", err)
 	}
 	// Create temporary dir
 	repoPath, err := ioutil.TempDir("", "ipfs-shell")
 	if err != nil {
-		return C.CString(fmt.Sprintf("Unable to get temp dir: %v", err))
+		return nil, fmt.Errorf("Unable to get temp dir: %v", err)
 	}
 	// Set private network key
-	swarmkey := []byte("/key/swarm/psk/1.0.0/\n/base16/\n3bafac1973088aceaa01fab233dc2c250da22286c308e7b59b450149d8c08af5")
-	tmpfn := filepath.Join(repoPath, "swarm.key")
-	if err := ioutil.WriteFile(tmpfn, swarmkey, 0666); err != nil {
-		return C.CString(fmt.Sprintf("Unable to create swarm key file: %v", err))
-	}
+	// swarmkey := []byte("/key/swarm/psk/1.0.0/\n/base16/\n3bafac1973088aceaa01fab233dc2c250da22286c308e7b59b450149d8c08af5")
+	// tmpfn := filepath.Join(repoPath, "swarm.key")
+	// if err := ioutil.WriteFile(tmpfn, swarmkey, 0666); err != nil {
+	// 	return C.CString(fmt.Sprintf("Unable to create swarm key file: %v", err))
+	// }
 	// Create config with default options and a 2048 bit key
 	cfg, err := config.Init(ioutil.Discard, 2048)
 	if err != nil {
-		return C.CString(fmt.Sprintf("Unable to create config: %v", err))
+		return nil, fmt.Errorf("Unable to create config: %v", err)
 	}
 	// Initialize the repo
 	err = fsrepo.Init(repoPath, cfg)
 	if err != nil {
-		return C.CString(fmt.Sprintf("Unable to initialize repo: %v", err))
+		return nil, fmt.Errorf("Unable to initialize repo: %v", err)
 	}
 	// Open the repo
-	repo, err = fsrepo.Open(repoPath)
+	repo, err := fsrepo.Open(repoPath)
 	if err != nil {
-		return C.CString(fmt.Sprintf("Unable to open repo: %v", err))
+		return nil, fmt.Errorf("Unable to open repo: %v", err)
 	}
 
 	// Put node configs together
@@ -118,70 +111,62 @@ func SpawnIpfsNode() *C.char {
 		Repo:    repo,
 	}
 	// Construct the node
-	inode, err = core.NewNode(ctx, nodeOptions)
+	inode, err := core.NewNode(ctx, nodeOptions)
 	if err != nil {
-		return C.CString(fmt.Sprintf("Unable to create new ipfs node: %v", err))
+		return nil, fmt.Errorf("Unable to create new ipfs node: %v", err)
 	}
 	fmt.Printf("Node id: %v\r\n", inode.Identity.String())
 
 	// Attach the core API to the constructed node
-	ipfs, err = coreapi.NewCoreAPI(inode)
+	ipfs, err := coreapi.NewCoreAPI(inode)
 	if err != nil {
-		return C.CString(fmt.Sprintf("Unable to attach api to ipfs node: %v", err))
+		return nil, fmt.Errorf("Unable to attach api to ipfs node: %v", err)
 	}
+	// If needed:
+	//bootstrapNodes := []string{
+	//	//Our Boostrapper node
+	//	"/ip4/40.65.198.241/tcp/4001/ipfs/QmPBSxF2LN95dk8d4WgooBnVzAUk8hkGXu569q8ctquwSa",
+	//}
+	//// Channel to wait for connected peers
+	//coPeers := make(chan *peerstore.PeerInfo)
 
-	bootstrapNodes := []string{
-		//Our Boostrapper node
-		"/ip4/40.65.198.241/tcp/4001/ipfs/QmPBSxF2LN95dk8d4WgooBnVzAUk8hkGXu569q8ctquwSa",
+	//// Connect to a bootstrapper peer so we can easily find other peers in our private network
+	//go connectToPeers(ctx, ipfs, bootstrapNodes, coPeers)
+
+	// <-coPeers
+
+	n := &ipfsNode{
+		api:  ipfs,
+		node: inode,
 	}
-	// Channel to wait for connected peers
-	coPeers := make(chan *peerstore.PeerInfo)
-
-	// Connect to a bootstrapper peer so we can easily find other peers in our private network
-	go connectToPeers(ctx, ipfs, bootstrapNodes, coPeers)
-
-	<-coPeers
-	return nil
+	return n, nil
 }
 
-//export GetNodeId
-func GetNodeId() *C.char {
-	return C.CString(inode.Identity.String())
-}
-
-//export GetFile
-func GetFile(cidStr *C.char) *C.char {
-	cid := icorepath.New(C.GoString(cidStr))
-	rootNode, err := ipfs.Unixfs().Get(ctx, cid)
+func (n *ipfsNode) GetFile(ctx context.Context, cidStr string) error {
+	cid := icorepath.New(cidStr)
+	rootNode, err := n.api.Unixfs().Get(ctx, cid)
 	if err != nil {
-		return C.CString(fmt.Sprintf("Unable to get file from Unixfs: %v", err))
+		return fmt.Errorf("Unable to get file from Unixfs: %v", err)
 	}
 	outputBasePath := "./"
-	outputPath := outputBasePath + C.GoString(cidStr)
+	outputPath := outputBasePath + cidStr
 
 	err = files.WriteTo(rootNode, outputPath)
 	if err != nil {
-		return C.CString(fmt.Sprintf("Unable to write file for cid: %v", err))
+		return fmt.Errorf("Unable to write file for cid: %v", err)
 	}
 	return nil
 }
 
-//export AddWebFile
-func AddWebFile(urlStr *C.char) (cidStr *C.char, errStr *C.char) {
-	u, err := url.Parse(C.GoString(urlStr))
+func (n *ipfsNode) AddWebFile(ctx context.Context, urlStr string) (string, error) {
+	u, err := url.Parse(urlStr)
 	if err != nil {
-		return nil, C.CString(fmt.Sprintf("Unable to parse url: %v", err))
+		return "", fmt.Errorf("Unable to parse url: %v", err)
 	}
 	wf := files.NewWebFile(u)
-	cidFile, err := ipfs.Unixfs().Add(ctx, wf)
+	cidFile, err := n.api.Unixfs().Add(ctx, wf)
 	if err != nil {
-		return nil, C.CString(fmt.Sprintf("Unable to add file to ipfs: %v", err))
+		return "", fmt.Errorf("Unable to add file to ipfs: %v", err)
 	}
-	return C.CString(cidFile.String()), nil
-}
-
-//export CloseNode
-func CloseNode() {
-	defer cancel()
-	repo.Close()
+	return cidFile.String(), nil
 }
