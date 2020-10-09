@@ -12,24 +12,22 @@ import (
 	graphsync "github.com/ipfs/go-graphsync/impl"
 	gsnet "github.com/ipfs/go-graphsync/network"
 	storeutil "github.com/ipfs/go-graphsync/storeutil"
-	blockstore "github.com/ipfs/go-ipfs-blockstore"
-	"github.com/libp2p/go-libp2p-core/host"
+	"github.com/ipfs/go-ipfs/core"
 )
 
-func NewDataTransfer(ctx context.Context, host host.Host, ds datastore.Batching) (datatransfer.Manager, error) {
+func NewDataTransfer(ctx context.Context, ipfs *core.IpfsNode, ds datastore.Batching) (datatransfer.Manager, error) {
 	// Create a graphsync network
-	gsNet := gsnet.NewFromLibp2pHost(host)
+	gsNet := gsnet.NewFromLibp2pHost(ipfs.PeerHost)
 	// Create a datastore network which is technically a graphsync network but the interface
 	// doesn't exactly match so we can't reuse the same one. Not sure if intential?
-	dtNet := dtnet.NewFromLibp2pHost(host)
+	dtNet := dtnet.NewFromLibp2pHost(ipfs.PeerHost)
 	// Integrate with Blockstore from IPFS
-	var bs blockstore.Blockstore
-	loader := storeutil.LoaderForBlockstore(bs)
-	storer := storeutil.StorerForBlockstore(bs)
+	loader := storeutil.LoaderForBlockstore(ipfs.Blockstore)
+	storer := storeutil.StorerForBlockstore(ipfs.Blockstore)
 	// Create a graphsync exchange
 	exchange := graphsync.New(ctx, gsNet, loader, storer)
 	// Build transport interface
-	tp := gstransport.NewTransport(host.ID(), exchange)
+	tp := gstransport.NewTransport(ipfs.PeerHost.ID(), exchange)
 	// A counter that persists to the datastore as it increments
 	key := datastore.NewKey("/retrieval/counter")
 	storedCounter := storedcounter.New(ds, key)

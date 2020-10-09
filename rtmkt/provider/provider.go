@@ -20,7 +20,7 @@ func main() {
 		log.Error().Err(err).Msg("Unable to create libp2p host")
 	}
 
-	hcid, err := n.Ipfs.AddWebFile(n.Ctx, "https://images.unsplash.com/photo-1601666703585-964591b026c5")
+	hcid, err := n.Store.AddWebFile("https://images.unsplash.com/photo-1601666703585-964591b026c5")
 	if err != nil {
 		log.Error().Err(err).Msg("Unable to load web content")
 	}
@@ -28,7 +28,10 @@ func main() {
 	log.Info().Str("cid", hcid).Msg("Serving content")
 
 	n.Provider.SubscribeToEvents(func(event rtmkt.ProviderEvent, state rtmkt.ProviderDealState) {
-		log.Info().Str("ProviderEvent", rtmkt.ProviderEvents[event]).Interface("ProviderDealState", state)
+		log.Info().
+			Str("ProviderEvent", rtmkt.ProviderEvents[event]).
+			Interface("ProviderDealStatus", rtmkt.DealStatuses[state.Status]).
+			Msg("Updating")
 	})
 
 	stop := make(chan os.Signal, 1)

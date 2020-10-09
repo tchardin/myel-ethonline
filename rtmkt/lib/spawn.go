@@ -29,7 +29,7 @@ const (
 
 type MyelNode struct {
 	Ctx      context.Context
-	Ipfs     *ipfsNode
+	Store    *ipfsStore
 	Client   RetrievalClient
 	Provider RetrievalProvider
 	lcloser  jsonrpc.ClientCloser
@@ -37,7 +37,7 @@ type MyelNode struct {
 
 func (mn *MyelNode) Close() {
 	mn.lcloser()
-	mn.Ipfs.node.Close()
+	mn.Store.node.Close()
 }
 
 func SpawnNode(nt NodeType) (*MyelNode, error) {
@@ -50,13 +50,13 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 	// Wrap the full node api to provide an adapted interface
 	radapter := NewRetrievalNode(lapi)
 	// Create an underlying ipfs node
-	ipfs, err := NewIpfsNode(ctx)
+	ipfs, err := NewIpfsStore(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("Unable to start ipfs node: %v", err)
 	}
 	node := &MyelNode{
 		Ctx:     ctx,
-		Ipfs:    ipfs,
+		Store:   ipfs,
 		lcloser: lcloser,
 	}
 	// Create a retrieval network protocol from the ipfs node libp2p host
@@ -67,9 +67,13 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Unable to create multistore: %v", err)
 	}
-	dataTransfer, err := NewDataTransfer(ctx, ipfs.node.PeerHost, ds)
+	dataTransfer, err := NewDataTransfer(ctx, ipfs.node, ds)
 	if err != nil {
 		return nil, fmt.Errorf("Unable to create graphsync data transfer: %v", err)
+	}
+	err = dataTransfer.Start(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("Unable to start data transfer: %v", err)
 	}
 	if nt == NodeTypeClient || nt == NodeTypeFull {
 		// Create a new namespace for our metadata store
@@ -91,8 +95,9 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 	}
 	if nt == NodeTypeProvider || nt == NodeTypeFull {
 		pds := namespace.Wrap(ds, datastore.NewKey("/retrieval/provider"))
-		testAddress := address.TestAddress
-		provider, err := NewProvider(testAddress, radapter, net, multiDs, dataTransfer, pds)
+		// Making a dummy address for now
+		providerAddress, _ := address.NewIDAddress(uint64(99))
+		provider, err := NewProvider(providerAddress, radapter, net, multiDs, ipfs, dataTransfer, pds)
 		if err != nil {
 			return nil, fmt.Errorf("Unable to create new retrieval provider: %v", err)
 		}

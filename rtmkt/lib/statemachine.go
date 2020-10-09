@@ -124,6 +124,7 @@ func SendFunds(ctx fsm.Context, environment ClientDealEnvironment, deal ClientDe
 		PaymentVoucher: voucher,
 	})
 	if err != nil {
+		fmt.Printf("Unable to send data transfer voucher: %v\n", err)
 		return ctx.Trigger(ClientEventWriteDealPaymentErrored, err)
 	}
 
@@ -467,6 +468,7 @@ type ProviderDealEnvironment interface {
 
 // TrackTransfer resumes a deal so we can start sending data
 func TrackTransfer(ctx fsm.Context, environment ProviderDealEnvironment, deal ProviderDealState) error {
+	fmt.Println("TrackTransfer")
 	err := environment.TrackTransfer(deal)
 	if err != nil {
 		return ctx.Trigger(ProviderEventDataTransferError, err)
@@ -475,6 +477,7 @@ func TrackTransfer(ctx fsm.Context, environment ProviderDealEnvironment, deal Pr
 }
 
 func UnpauseDeal(ctx fsm.Context, environment ProviderDealEnvironment, deal ProviderDealState) error {
+	fmt.Println("UnpauseDeal")
 	err := environment.TrackTransfer(deal)
 	if err != nil {
 		return ctx.Trigger(ProviderEventDataTransferError, err)
@@ -544,6 +547,16 @@ var FsmProviderEvents = fsm.Events{
 			return nil
 		}),
 
+	// receiving blocks
+	fsm.Event(ProviderEventBlockSent).
+		FromMany(DealStatusOngoing).ToNoChange().
+		Action(func(deal *ProviderDealState, totalSent uint64) error {
+			deal.TotalSent = totalSent
+			return nil
+		}),
+	fsm.Event(ProviderEventBlocksCompleted).
+		FromMany(DealStatusOngoing).To(DealStatusBlocksComplete),
+
 	// request payment
 	fsm.Event(ProviderEventPaymentRequested).
 		From(DealStatusOngoing).To(DealStatusFundsNeeded).
@@ -572,7 +585,7 @@ var FsmProviderEvents = fsm.Events{
 		}),
 
 	// completing
-	fsm.Event(ProviderEventComplete).From(DealStatusFinalizing).To(DealStatusCompleting),
+	fsm.Event(ProviderEventComplete).FromMany(DealStatusBlocksComplete, DealStatusFinalizing).To(DealStatusCompleting),
 	fsm.Event(ProviderEventCleanupComplete).From(DealStatusCompleting).To(DealStatusCompleted),
 
 	// Error cleanup

@@ -10,7 +10,6 @@ import (
 	"github.com/filecoin-project/go-multistore"
 	"github.com/filecoin-project/go-statemachine/fsm"
 	"github.com/hannahhoward/go-pubsub"
-	"github.com/ipfs/go-cid"
 	"github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-datastore/namespace"
 )
@@ -50,6 +49,9 @@ type Provider struct {
 	multiStore   *multistore.MultiStore
 	node         RetrievalNode
 
+	// TODO integrate properly with multistore
+	store *ipfsStore
+
 	requestValidator *ProviderRequestValidator
 	revalidator      *ProviderRevalidator
 
@@ -83,10 +85,12 @@ func NewProvider(
 	node RetrievalNode,
 	network RetrievalMarketNetwork,
 	multiStore *multistore.MultiStore,
+	store *ipfsStore,
 	dataTransfer datatransfer.Manager,
 	ds datastore.Batching,
 ) (RetrievalProvider, error) {
 	p := &Provider{
+		store:        store,
 		multiStore:   multiStore,
 		dataTransfer: dataTransfer,
 		node:         node,
@@ -128,11 +132,12 @@ func NewProvider(
 	if err != nil {
 		return nil, err
 	}
-	transportConfigurer := TransportConfigurer(network.ID(), &providerStoreGetter{p})
-	err = p.dataTransfer.RegisterTransportConfigurer(&DealProposal{}, transportConfigurer)
-	if err != nil {
-		return nil, err
-	}
+	// transportConfigurer := TransportConfigurer(network.ID(), &providerStoreGetter{p})
+	// err = p.dataTransfer.RegisterTransportConfigurer(&DealProposal{}, transportConfigurer)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	dataTransfer.SubscribeToEvents(ProviderDataTransferSubscriber(p.stateMachines))
 
 	return p, nil
 }
@@ -209,21 +214,14 @@ func (p *Provider) HandleQueryStream(stream RetrievalQueryStream) {
 		MaxPaymentInterval:         ask.PaymentInterval,
 		MaxPaymentIntervalIncrease: ask.PaymentIntervalIncrease,
 	}
-	// TODO: check if cid is available in our store
-	cid := query.PayloadCID
-	itemAvailable, err := checkCID(cid)
-	if err == nil && itemAvailable {
+	size, err := p.store.GetSize(query.PayloadCID)
+	if err == nil && size > 0 {
 		answer.Status = QueryResponseAvailable
-		// TODO answer.Size = uint64(pieceInfo.Deals[0].Length)
+		answer.Size = uint64(size)
 	}
 
 	if err := stream.WriteQueryResponse(answer); err != nil {
 		fmt.Printf("Retrieval query: WriteCborRPC: %s", err)
 		return
 	}
-}
-
-// TODO
-func checkCID(payloadCID cid.Cid) (bool, error) {
-	return true, nil
 }

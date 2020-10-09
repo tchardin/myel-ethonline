@@ -166,6 +166,7 @@ func (pr *ProviderRevalidator) writeDealState(deal ProviderDealState) {
 
 // Revalidate revalidates a request with a new voucher
 func (pr *ProviderRevalidator) Revalidate(channelID datatransfer.ChannelID, voucher datatransfer.Voucher) (datatransfer.VoucherResult, error) {
+	fmt.Println("Revalidate")
 	pr.trackedChannelsLk.RLock()
 	defer pr.trackedChannelsLk.RUnlock()
 	channel, ok := pr.trackedChannels[channelID]
@@ -186,7 +187,7 @@ func (pr *ProviderRevalidator) Revalidate(channelID datatransfer.ChannelID, vouc
 }
 
 func (pr *ProviderRevalidator) processPayment(dealID ProviderDealIdentifier, payment *DealPayment) (*DealResponse, error) {
-
+	fmt.Println("processPayment")
 	tok, _, err := pr.env.Node().GetChainHead(context.TODO())
 	if err != nil {
 		_ = pr.env.SendEvent(dealID, ProviderEventSaveVoucherFailed, err)
@@ -248,6 +249,7 @@ func errorDealResponse(dealID ProviderDealIdentifier, err error) *DealResponse {
 // request revalidation or nil to continue uninterrupted,
 // other errors will terminate the request
 func (pr *ProviderRevalidator) OnPullDataSent(chid datatransfer.ChannelID, additionalBytesSent uint64) (bool, datatransfer.VoucherResult, error) {
+	fmt.Println("OnPullDataSent")
 	pr.trackedChannelsLk.RLock()
 	defer pr.trackedChannelsLk.RUnlock()
 	channel, ok := pr.trackedChannels[chid]
@@ -281,6 +283,7 @@ func (pr *ProviderRevalidator) OnPullDataSent(chid datatransfer.ChannelID, addit
 // request revalidation or nil to continue uninterrupted,
 // other errors will terminate the request
 func (pr *ProviderRevalidator) OnPushDataReceived(chid datatransfer.ChannelID, additionalBytesReceived uint64) (bool, datatransfer.VoucherResult, error) {
+	fmt.Println("OnPushDataReceived")
 	return false, nil, nil
 }
 
@@ -289,6 +292,7 @@ func (pr *ProviderRevalidator) OnPushDataReceived(chid datatransfer.ChannelID, a
 // if VoucherResult is non nil, the request will enter a settlement phase awaiting
 // a final update
 func (pr *ProviderRevalidator) OnComplete(chid datatransfer.ChannelID) (bool, datatransfer.VoucherResult, error) {
+	fmt.Println("OnComplete")
 	pr.trackedChannelsLk.RLock()
 	defer pr.trackedChannelsLk.RUnlock()
 	channel, ok := pr.trackedChannels[chid]
@@ -307,6 +311,8 @@ func (pr *ProviderRevalidator) OnComplete(chid datatransfer.ChannelID) (bool, da
 	}
 
 	paymentOwed := big.Mul(abi.NewTokenAmount(int64(channel.totalSent-channel.totalPaidFor)), channel.pricePerByte)
+
+	fmt.Printf("PaymentOwed: %v\n", paymentOwed)
 	if paymentOwed.Equals(big.Zero()) {
 		return true, &DealResponse{
 			ID:     channel.dealID.DealID,

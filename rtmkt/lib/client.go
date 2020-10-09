@@ -61,6 +61,9 @@ type RetrievalClient interface {
 
 	// ListDeals returns all deals
 	ListDeals() (map[DealID]ClientDealState, error)
+
+	// Debugging
+	NewStoreID() *multistore.StoreID
 }
 
 // Client is the production implementation of the RetrievalClient interface
@@ -140,11 +143,11 @@ func NewClient(
 
 	dataTransfer.SubscribeToEvents(ClientDataTransferSubscriber(c.stateMachines))
 
-	transportConfigurer := TransportConfigurer(network.ID(), &clientStoreGetter{c})
-	err = dataTransfer.RegisterTransportConfigurer(&DealProposal{}, transportConfigurer)
-	if err != nil {
-		return nil, err
-	}
+	// transportConfigurer := TransportConfigurer(network.ID(), &clientStoreGetter{c})
+	// err = dataTransfer.RegisterTransportConfigurer(&DealProposal{}, transportConfigurer)
+	// if err != nil {
+	// 	return nil, err
+	// }
 	return c, nil
 }
 
@@ -261,6 +264,12 @@ func (c *Client) Retrieve(ctx context.Context, payloadCID cid.Cid, params Params
 	}
 
 	return dealID, nil
+}
+
+// NewStoreID is for creating new store id from other package
+func (c *Client) NewStoreID() *multistore.StoreID {
+	id := c.multiStore.Next()
+	return &id
 }
 
 func (c *Client) notifySubscribers(eventName fsm.EventName, state fsm.StateType) {

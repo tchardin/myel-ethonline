@@ -1,6 +1,7 @@
 package rtmkt
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/ioutil"
@@ -9,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	blocks "github.com/ipfs/go-block-format"
+	"github.com/ipfs/go-cid"
 	config "github.com/ipfs/go-ipfs-config"
 	files "github.com/ipfs/go-ipfs-files"
 	"github.com/ipfs/go-ipfs/core"
@@ -17,13 +20,16 @@ import (
 	"github.com/ipfs/go-ipfs/plugin/loader"
 	fsrepo "github.com/ipfs/go-ipfs/repo/fsrepo"
 	icore "github.com/ipfs/interface-go-ipfs-core"
+	"github.com/ipfs/interface-go-ipfs-core/options"
 	icorepath "github.com/ipfs/interface-go-ipfs-core/path"
 	peer "github.com/libp2p/go-libp2p-peer"
 	peerstore "github.com/libp2p/go-libp2p-peerstore"
 	ma "github.com/multiformats/go-multiaddr"
+	"github.com/multiformats/go-multihash"
 )
 
-type ipfsNode struct {
+type ipfsStore struct {
+	ctx  context.Context
 	api  icore.CoreAPI
 	node *core.IpfsNode
 }
@@ -64,7 +70,7 @@ func connectToPeers(ctx context.Context, ipfs icore.CoreAPI, peers []string, coP
 	return nil
 }
 
-func NewIpfsNode(ctx context.Context) (*ipfsNode, error) {
+func NewIpfsStore(ctx context.Context) (*ipfsStore, error) {
 	// ======== Temp repo ==========
 	// Load plugins if available
 	plugins, err := loader.NewPluginLoader(filepath.Join("", "plugins"))
@@ -127,6 +133,7 @@ func NewIpfsNode(ctx context.Context) (*ipfsNode, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Unable to attach api to ipfs node: %v", err)
 	}
+
 	// If needed:
 	//bootstrapNodes := []string{
 	//	//Our Boostrapper node
@@ -140,16 +147,17 @@ func NewIpfsNode(ctx context.Context) (*ipfsNode, error) {
 
 	// <-coPeers
 
-	n := &ipfsNode{
+	n := &ipfsStore{
+		ctx:  ctx,
 		api:  ipfs,
 		node: inode,
 	}
 	return n, nil
 }
 
-func (n *ipfsNode) GetFile(ctx context.Context, cidStr string) error {
+func (s *ipfsStore) GetFile(cidStr string) error {
 	cid := icorepath.New(cidStr)
-	rootNode, err := n.api.Unixfs().Get(ctx, cid)
+	rootNode, err := s.api.Unixfs().Get(s.ctx, cid)
 	if err != nil {
 		return fmt.Errorf("Unable to get file from Unixfs: %v", err)
 	}
@@ -163,22 +171,22 @@ func (n *ipfsNode) GetFile(ctx context.Context, cidStr string) error {
 	return nil
 }
 
-func (n *ipfsNode) AddWebFile(ctx context.Context, urlStr string) (string, error) {
+func (s *ipfsStore) AddWebFile(urlStr string) (string, error) {
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return "", fmt.Errorf("Unable to parse url: %v", err)
 	}
 	wf := files.NewWebFile(u)
-	cidFile, err := n.api.Unixfs().Add(ctx, wf)
+	cidFile, err := s.api.Unixfs().Add(s.ctx, wf)
 	if err != nil {
 		return "", fmt.Errorf("Unable to add file to ipfs: %v", err)
 	}
 	return cidFile.String(), nil
 }
 
-func (n *ipfsNode) GetFirstPeer(ctx context.Context) icore.ConnectionInfo {
+func (s *ipfsStore) GetFirstPeer() icore.ConnectionInfo {
 	for {
-		prs, err := n.api.Swarm().Peers(ctx)
+		prs, err := s.api.Swarm().Peers(s.ctx)
 		if err != nil {
 			fmt.Printf("Unable to list peers: %v", err)
 		}
@@ -188,4 +196,88 @@ func (n *ipfsNode) GetFirstPeer(ctx context.Context) icore.ConnectionInfo {
 		}
 		time.Sleep(5 * time.Second)
 	}
+}
+
+func (s *ipfsStore) DeleteBlock(cid cid.Cid) error {
+	return fmt.Errorf("Not supported")
+}
+
+func (s *ipfsStore) Has(cid cid.Cid) (bool, error) {
+	_, err := s.api.Block().Stat(s.ctx, icorepath.IpldPath(cid))
+	if err != nil {
+		// Stat() will fail with an err if the block isn't in the
+		// blockstore. If that's the case, return false without
+		// an error since that's the original intention of this method.
+		if err.Error() == "blockservice: key not found" {
+			return false, nil
+		}
+		return false, fmt.Errorf("getting ipfs block: %w", err)
+	}
+
+	return true, nil
+}
+
+func (s *ipfsStore) Get(cid cid.Cid) (blocks.Block, error) {
+	rd, err := s.api.Block().Get(s.ctx, icorepath.IpldPath(cid))
+	if err != nil {
+		return nil, fmt.Errorf("getting ipfs block: %w", err)
+	}
+
+	data, err := ioutil.ReadAll(rd)
+	if err != nil {
+		return nil, err
+	}
+
+	return blocks.NewBlockWithCid(data, cid)
+}
+
+func (s *ipfsStore) GetSize(cid cid.Cid) (int, error) {
+	st, err := s.api.Block().Stat(s.ctx, icorepath.IpldPath(cid))
+	if err != nil {
+		return 0, fmt.Errorf("getting ipfs block: %w", err)
+	}
+
+	return st.Size(), nil
+}
+
+func (s *ipfsStore) Put(block blocks.Block) error {
+	mhd, err := multihash.Decode(block.Cid().Hash())
+	if err != nil {
+		return err
+	}
+
+	_, err = s.api.Block().Put(s.ctx, bytes.NewReader(block.RawData()),
+		options.Block.Hash(mhd.Code, mhd.Length),
+		options.Block.Format(cid.CodecToStr[block.Cid().Type()]))
+	return err
+}
+
+func (s *ipfsStore) PutMany(blocks []blocks.Block) error {
+	// TODO: could be done in parallel
+
+	for _, block := range blocks {
+		if err := s.Put(block); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *ipfsStore) AllKeysChan(ctx context.Context) (<-chan cid.Cid, error) {
+	return nil, fmt.Errorf("not supported")
+}
+
+func (s *ipfsStore) HashOnRead(enabled bool) {
+	return // TODO: We could technically support this, but..
+}
+
+func (s *ipfsStore) Offline() error {
+	// We can set our api to offline to prevent getting files via ipfs regular transport
+	api, err := s.api.WithOptions(options.Api.Offline(true))
+	if err != nil {
+		return fmt.Errorf("Unable to create offline api: %v", err)
+	}
+	s.api = api
+	return nil
 }

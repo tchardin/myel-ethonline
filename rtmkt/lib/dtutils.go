@@ -58,6 +58,13 @@ func clientEvent(event datatransfer.Event, channelState datatransfer.ChannelStat
 
 		return clientEventForResponse(response)
 	case datatransfer.Error:
+		fmt.Printf(`
+BaseCID: %v
+TotalSize: %v
+Channel Status: %v
+Received: %v
+Error: %v
+`, channelState.BaseCID(), channelState.TotalSize(), channelState.Status(), channelState.Received(), event.Message)
 		if channelState.Message() == datatransfer.ErrRejected.Error() {
 			return ClientEventDealRejected, []interface{}{"rejected for unknown reasons"}
 		}
@@ -89,8 +96,59 @@ func ClientDataTransferSubscriber(deals EventReceiver) datatransfer.Subscriber {
 		// data transfer events for progress do not affect deal state
 		err := deals.Send(dealProposal.ID, retrievalEvent, params...)
 		if err != nil {
-			fmt.Printf("processing dt event: %w\n", err)
+			fmt.Printf("processing dt event: %v\n", err)
 		}
+	}
+}
+
+const noProviderEvent = ProviderEvent(math.MaxUint64)
+
+func providerEvent(event datatransfer.Event, channelState datatransfer.ChannelState) (ProviderEvent, []interface{}) {
+	switch event.Code {
+	case datatransfer.Accept:
+		return ProviderEventDealAccepted, []interface{}{channelState.ChannelID()}
+	case datatransfer.Error:
+		fmt.Printf("Channel Status: %v\n", channelState.Status())
+		fmt.Printf("Sent: %v\n", channelState.Sent())
+		fmt.Printf("Datatransfer error: %v\n", event.Message)
+		return ProviderEventDataTransferError, []interface{}{fmt.Errorf("deal data transfer failed: %s", event.Message)}
+	case datatransfer.Cancel:
+		return ProviderEventClientCancelled, nil
+	default:
+		return noProviderEvent, nil
+	}
+}
+
+// ProviderDataTransferSubscriber is the function called when an event occurs in a data
+// transfer received by a provider -- it reads the voucher to verify this event occurred
+// in a storage market deal, then, based on the data transfer event that occurred, it generates
+// and update message for the deal -- either moving to staged for a completion
+// event or moving to error if a data transfer error occurs
+func ProviderDataTransferSubscriber(deals EventReceiver) datatransfer.Subscriber {
+	return func(event datatransfer.Event, channelState datatransfer.ChannelState) {
+		dealProposal, ok := dealProposalFromVoucher(channelState.Voucher())
+		// if this event is for a transfer not related to storage, ignore
+		if !ok {
+			return
+		}
+
+		if channelState.Status() == datatransfer.Completed {
+			err := deals.Send(ProviderDealIdentifier{DealID: dealProposal.ID, Receiver: channelState.Recipient()}, ProviderEventComplete)
+			if err != nil {
+				fmt.Printf("Error processing dt event: %v\n", err)
+			}
+		}
+
+		retrievalEvent, params := providerEvent(event, channelState)
+		if retrievalEvent == noProviderEvent {
+			return
+		}
+
+		err := deals.Send(ProviderDealIdentifier{DealID: dealProposal.ID, Receiver: channelState.Recipient()}, retrievalEvent, params...)
+		if err != nil {
+			fmt.Printf("Error processing dt event: %v\n", err)
+		}
+
 	}
 }
 
@@ -119,7 +177,7 @@ func TransportConfigurer(thisPeer peer.ID, storeGetter StoreGetter) datatransfer
 		otherPeer := channelID.OtherParty(thisPeer)
 		store, err := storeGetter.Get(otherPeer, dealProposal.ID)
 		if err != nil {
-			fmt.Printf("attempting to configure data store: %w\n", err)
+			fmt.Printf("attempting to configure data store: %v\n", err)
 			return
 		}
 		if store == nil {
@@ -127,7 +185,7 @@ func TransportConfigurer(thisPeer peer.ID, storeGetter StoreGetter) datatransfer
 		}
 		err = gsTransport.UseStore(channelID, store.Loader, store.Storer)
 		if err != nil {
-			fmt.Printf("attempting to configure data store: %w\n", err)
+			fmt.Printf("attempting to configure data store: %v\n", err)
 		}
 	}
 }
