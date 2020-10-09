@@ -1,4 +1,4 @@
-package main
+package rtmkt
 
 // ProviderEvent is an event that occurs in a deal lifecycle on the provider
 type ProviderEvent uint64

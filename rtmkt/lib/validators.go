@@ -1,4 +1,4 @@
-package main
+package rtmkt
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 type ValidationEnvironment interface {
 	// GetPiece(c cid.Cid, pieceCID *cid.Cid) (piecestore.PieceInfo, error)
 	// CheckDealParams verifies the given deal params are acceptable
-	CheckDealParams(pricePerByte abi.TokenAmount, paymentInterval uint64, paymentIntervalIncrease uint64, unsealPrice abi.TokenAmount) error
+	CheckDealParams(pricePerByte abi.TokenAmount, paymentInterval uint64, paymentIntervalIncrease uint64) error
 	// RunDealDecisioningLogic runs custom deal decision logic to decide if a deal is accepted, if present
 	RunDealDecisioningLogic(ctx context.Context, state ProviderDealState) (bool, string, error)
 	// StateMachines returns the FSM Group to begin tracking with
@@ -51,9 +51,41 @@ func (rv *ProviderRequestValidator) ValidatePull(receiver peer.ID, voucher datat
 	if proposal.PayloadCID != baseCid {
 		return nil, fmt.Errorf("Incorrect CID for this proposal")
 	}
+	pds := ProviderDealState{
+		DealProposal: *proposal,
+		Receiver:     receiver,
+	}
 	response := DealResponse{
-		ID:     proposal.ID,
-		Status: DealStatusAccepted,
+		ID: proposal.ID,
+	}
+	// check that the deal parameters match our required parameters or
+	// reject outright
+	err := rv.env.CheckDealParams(pds.PricePerByte, pds.PaymentInterval, pds.PaymentIntervalIncrease)
+	if err != nil {
+		response.Status = DealStatusRejected
+	}
+
+	accepted, reason, err := rv.env.RunDealDecisioningLogic(context.TODO(), pds)
+	if !accepted {
+		response.Status = DealStatusRejected
+		response.Message = reason
+		return &response, nil
+	}
+	if err != nil {
+		response.Status = DealStatusErrored
+		return &response, nil
+	}
+
+	pds.StoreID, err = rv.env.NextStoreID()
+	if err != nil {
+		response.Status = DealStatusErrored
+		return &response, nil
+	}
+	response.Status = DealStatusAccepted
+
+	err = rv.env.BeginTracking(pds)
+	if err != nil {
+		return nil, err
 	}
 	return &response, nil
 }
@@ -61,7 +93,7 @@ func (rv *ProviderRequestValidator) ValidatePull(receiver peer.ID, voucher datat
 // RevalidatorEnvironment are the dependencies needed to
 // build the logic of revalidation -- essentially, access to the node at statemachines
 type RevalidatorEnvironment interface {
-	Node() RetrievalProviderNode
+	Node() RetrievalNode
 	SendEvent(dealID ProviderDealIdentifier, evt ProviderEvent, args ...interface{}) error
 	Get(dealID ProviderDealIdentifier) (ProviderDealState, error)
 }
@@ -134,6 +166,7 @@ func (pr *ProviderRevalidator) writeDealState(deal ProviderDealState) {
 
 // Revalidate revalidates a request with a new voucher
 func (pr *ProviderRevalidator) Revalidate(channelID datatransfer.ChannelID, voucher datatransfer.Voucher) (datatransfer.VoucherResult, error) {
+	fmt.Println("Revalidate")
 	pr.trackedChannelsLk.RLock()
 	defer pr.trackedChannelsLk.RUnlock()
 	channel, ok := pr.trackedChannels[channelID]
@@ -154,7 +187,7 @@ func (pr *ProviderRevalidator) Revalidate(channelID datatransfer.ChannelID, vouc
 }
 
 func (pr *ProviderRevalidator) processPayment(dealID ProviderDealIdentifier, payment *DealPayment) (*DealResponse, error) {
-
+	fmt.Println("processPayment")
 	tok, _, err := pr.env.Node().GetChainHead(context.TODO())
 	if err != nil {
 		_ = pr.env.SendEvent(dealID, ProviderEventSaveVoucherFailed, err)
@@ -216,6 +249,7 @@ func errorDealResponse(dealID ProviderDealIdentifier, err error) *DealResponse {
 // request revalidation or nil to continue uninterrupted,
 // other errors will terminate the request
 func (pr *ProviderRevalidator) OnPullDataSent(chid datatransfer.ChannelID, additionalBytesSent uint64) (bool, datatransfer.VoucherResult, error) {
+	fmt.Println("OnPullDataSent")
 	pr.trackedChannelsLk.RLock()
 	defer pr.trackedChannelsLk.RUnlock()
 	channel, ok := pr.trackedChannels[chid]
@@ -249,6 +283,7 @@ func (pr *ProviderRevalidator) OnPullDataSent(chid datatransfer.ChannelID, addit
 // request revalidation or nil to continue uninterrupted,
 // other errors will terminate the request
 func (pr *ProviderRevalidator) OnPushDataReceived(chid datatransfer.ChannelID, additionalBytesReceived uint64) (bool, datatransfer.VoucherResult, error) {
+	fmt.Println("OnPushDataReceived")
 	return false, nil, nil
 }
 
@@ -257,6 +292,7 @@ func (pr *ProviderRevalidator) OnPushDataReceived(chid datatransfer.ChannelID, a
 // if VoucherResult is non nil, the request will enter a settlement phase awaiting
 // a final update
 func (pr *ProviderRevalidator) OnComplete(chid datatransfer.ChannelID) (bool, datatransfer.VoucherResult, error) {
+	fmt.Println("OnComplete")
 	pr.trackedChannelsLk.RLock()
 	defer pr.trackedChannelsLk.RUnlock()
 	channel, ok := pr.trackedChannels[chid]
@@ -275,6 +311,8 @@ func (pr *ProviderRevalidator) OnComplete(chid datatransfer.ChannelID) (bool, da
 	}
 
 	paymentOwed := big.Mul(abi.NewTokenAmount(int64(channel.totalSent-channel.totalPaidFor)), channel.pricePerByte)
+
+	fmt.Printf("PaymentOwed: %v\n", paymentOwed)
 	if paymentOwed.Equals(big.Zero()) {
 		return true, &DealResponse{
 			ID:     channel.dealID.DealID,

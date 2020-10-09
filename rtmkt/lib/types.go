@@ -1,7 +1,8 @@
-package main
+package rtmkt
 
 import (
 	"fmt"
+
 	"github.com/filecoin-project/go-address"
 	datatransfer "github.com/filecoin-project/go-data-transfer"
 	"github.com/filecoin-project/go-multistore"
@@ -12,12 +13,38 @@ import (
 	"github.com/libp2p/go-libp2p-core/protocol"
 )
 
-//go:generate cbor-gen-for --map-encoding Query QueryResponse DealProposal DealResponse Params QueryParams DealPayment ProviderDealState PaymentInfo Ask
+//go:generate cbor-gen-for --map-encoding Query QueryResponse DealProposal DealResponse Params QueryParams DealPayment ProviderDealState PaymentInfo Ask RetrievalPeer ClientDealState
 
 // QueryProtocolID is the protocol for querying information about retrieval
 // deal parameters
 // let's keep the same as lotus for now
 const QueryProtocolID = protocol.ID("/fil/retrieval/qry/1.0.0")
+
+// ClientDealState is the current state of a deal from the point of view
+// of a retrieval client
+type ClientDealState struct {
+	DealProposal
+	StoreID              *multistore.StoreID
+	ChannelID            datatransfer.ChannelID
+	LastPaymentRequested bool
+	AllBlocksReceived    bool
+	TotalFunds           abi.TokenAmount
+	ClientWallet         address.Address
+	MinerWallet          address.Address
+	PaymentInfo          *PaymentInfo
+	Status               DealStatus
+	Sender               peer.ID
+	TotalReceived        uint64
+	Message              string
+	BytesPaidFor         uint64
+	CurrentInterval      uint64
+	PaymentRequested     abi.TokenAmount
+	FundsSpent           abi.TokenAmount
+	UnsealFundsPaid      abi.TokenAmount
+	WaitMsgCID           *cid.Cid // the CID of any message the client deal is waiting for
+	VoucherShortfall     abi.TokenAmount
+	LegacyProtocol       bool
+}
 
 // ProviderDealState is the current state of a deal from the point of view
 // of a retrieval provider
@@ -181,3 +208,46 @@ type Query struct {
 
 // QueryUndefined is a query with no values
 var QueryUndefined = Query{}
+
+// ChannelAvailableFunds provides information about funds in a channel
+type ChannelAvailableFunds struct {
+	// ConfirmedAmt is the amount of funds that have been confirmed on-chain
+	// for the channel
+	ConfirmedAmt abi.TokenAmount
+	// PendingAmt is the amount of funds that are pending confirmation on-chain
+	PendingAmt abi.TokenAmount
+	// PendingWaitSentinel can be used with PaychGetWaitReady to wait for
+	// confirmation of pending funds
+	PendingWaitSentinel *cid.Cid
+	// QueuedAmt is the amount that is queued up behind a pending request
+	QueuedAmt abi.TokenAmount
+	// VoucherRedeemedAmt is the amount that is redeemed by vouchers on-chain
+	// and in the local datastore
+	VoucherReedeemedAmt abi.TokenAmount
+}
+
+// RetrievalPeer is a provider address/peer.ID pair (everything needed to make
+// deals for with a miner)
+type RetrievalPeer struct {
+	Address  address.Address
+	ID       peer.ID
+	PieceCID *cid.Cid
+}
+
+// ShortfallErorr is an error that indicates a short fall of funds
+type ShortfallError struct {
+	shortfall abi.TokenAmount
+}
+
+// NewShortfallError returns a new error indicating a shortfall of funds
+func NewShortfallError(shortfall abi.TokenAmount) error {
+	return ShortfallError{shortfall}
+}
+
+// Shortfall returns the numerical value of the shortfall
+func (se ShortfallError) Shortfall() abi.TokenAmount {
+	return se.shortfall
+}
+func (se ShortfallError) Error() string {
+	return fmt.Sprintf("Inssufficient Funds. Shortfall: %s", se.shortfall.String())
+}

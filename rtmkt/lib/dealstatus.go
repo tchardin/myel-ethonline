@@ -1,4 +1,4 @@
-package main
+package rtmkt
 
 // DealStatus is the status of a retrieval deal returned by a provider
 // in a DealResponse
@@ -58,6 +58,9 @@ const (
 
 	// DealStatusErrored indicates a deal has terminated in an error
 	DealStatusErrored
+
+	// DealStatusBlocksComplete indicates that all blocks have been processed for the piece
+	DealStatusBlocksComplete
 
 	// DealStatusFinalizing means the last payment has been received and
 	// we are just confirming the deal is complete
