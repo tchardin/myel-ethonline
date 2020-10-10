@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"os"
+	"path"
 	"strings"
 
 	"github.com/filecoin-project/go-address"
@@ -61,7 +63,7 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 	}
 
 	// Wrap the full node api to provide an adapted interface
-	radapter := NewRetrievalNode(lapi, rtmkt.TestModeOn)
+	radapter := NewRetrievalNode(lapi, TestModeOn)
 	// Create an underlying ipfs node
 	ipfs, err := NewIpfsStore(ctx)
 	if err != nil {
@@ -91,7 +93,7 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 		return nil, fmt.Errorf("Unable to start data transfer: %v", err)
 	}
 	if nt == NodeTypeClient || nt == NodeTypeFull {
-		if err := node.WalletImport("client.private"); err != nil {
+		if _, err := node.WalletImport("client.private"); err != nil {
 			return nil, err
 		}
 		// Create a new namespace for our metadata store
@@ -112,12 +114,12 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 		}
 	}
 	if nt == NodeTypeProvider || nt == NodeTypeFull {
-		if err := node.WalletImport("provider.private"); err != nil {
+		providerAddress, err := node.WalletImport("provider.private")
+		if err != nil {
 			return nil, err
 		}
 		pds := namespace.Wrap(ds, datastore.NewKey("/retrieval/provider"))
-		// Making a dummy address for now
-		providerAddress, _ := address.NewIDAddress(uint64(99))
+
 		provider, err := NewProvider(providerAddress, radapter, net, multiDs, ipfs, dataTransfer, pds)
 		if err != nil {
 			return nil, fmt.Errorf("Unable to create new retrieval provider: %v", err)
@@ -133,23 +135,26 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 	return node, nil
 }
 
-func (mn *MyelNode) WalletImport(path string) error {
-
-	fdata, err := ioutil.ReadFile(path)
+func (mn *MyelNode) WalletImport(name string) (address.Address, error) {
+	wd, err := os.Getwd()
 	if err != nil {
-		return fmt.Errorf("Unable to import private key file: %v", err)
+		return address.Undef, fmt.Errorf("Unable to get current directory: %v", err)
+	}
+	fdata, err := ioutil.ReadFile(path.Join(wd, name))
+	if err != nil {
+		return address.Undef, fmt.Errorf("Unable to import private key file: %v", err)
 	}
 	var ki types.KeyInfo
 	data, err := hex.DecodeString(strings.TrimSpace(string(fdata)))
 	if err != nil {
-		return fmt.Errorf("Unable to decode hex string: %v", err)
+		return address.Undef, fmt.Errorf("Unable to decode hex string: %v", err)
 	}
 	if err := json.Unmarshal(data, &ki); err != nil {
-		return fmt.Errorf("Unable to unmarshal keyinfo: %v")
+		return address.Undef, fmt.Errorf("Unable to unmarshal keyinfo: %v", err)
 	}
 	addr, err := mn.Wallet.Import(&ki)
 	if err := mn.Wallet.SetDefault(addr); err != nil {
-		return err
+		return address.Undef, err
 	}
-	return nil
+	return addr, nil
 }
