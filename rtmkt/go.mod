@@ -15,6 +15,8 @@ require (
 	github.com/filecoin-project/go-storedcounter v0.0.0-20200421200003-1c99c62e8a5b
 	github.com/filecoin-project/lotus v0.9.0
 	github.com/filecoin-project/specs-actors v0.9.12
+	github.com/filecoin-project/specs-actors/v2 v2.0.1
+	github.com/google/uuid v1.1.1
 	github.com/hannahhoward/cbor-gen-for v0.0.0-20200817222906-ea96cece81f1
 	github.com/hannahhoward/go-pubsub v0.0.0-20200423002714-8d62886cc36e
 	github.com/ipfs/go-block-format v0.0.2
@@ -35,6 +37,7 @@ require (
 	github.com/libp2p/go-libp2p-peerstore v0.2.6
 	github.com/multiformats/go-multiaddr v0.3.1
 	github.com/multiformats/go-multihash v0.0.14
+	github.com/prometheus/common v0.10.0
 	github.com/rs/zerolog v1.20.0
 	github.com/whyrusleeping/cbor-gen v0.0.0-20200826160007-0b9f6c5fb163
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1
