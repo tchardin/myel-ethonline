@@ -874,6 +874,20 @@ type ChannelInfo struct {
 	Settling bool
 }
 
+func (ci *ChannelInfo) from() address.Address {
+	if ci.Direction == DirOutbound {
+		return ci.Control
+	}
+	return ci.Target
+}
+
+func (ci *ChannelInfo) to() address.Address {
+	if ci.Direction == DirOutbound {
+		return ci.Target
+	}
+	return ci.Control
+}
+
 // MsgInfo stores information about a create channel / add funds message
 // that has been sent
 type MsgInfo struct {
