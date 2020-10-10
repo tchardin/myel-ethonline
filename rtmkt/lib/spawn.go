@@ -2,14 +2,20 @@ package rtmkt
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
+	"strings"
 
 	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-jsonrpc"
 	"github.com/filecoin-project/go-multistore"
 	"github.com/filecoin-project/go-storedcounter"
 	lclient "github.com/filecoin-project/lotus/api/client"
+	"github.com/filecoin-project/lotus/chain/types"
+	"github.com/filecoin-project/lotus/chain/wallet"
 	"github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-datastore/namespace"
 )
@@ -32,6 +38,7 @@ type MyelNode struct {
 	Store    *ipfsStore
 	Client   RetrievalClient
 	Provider RetrievalProvider
+	Wallet   *wallet.Wallet
 	lcloser  jsonrpc.ClientCloser
 }
 
@@ -47,16 +54,24 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Unable to start lotus rpc: %v", err)
 	}
+	memks := wallet.NewMemKeyStore()
+	w, err := wallet.NewWallet(memks)
+	if err != nil {
+		return nil, fmt.Errorf("Unable to create new wallet: %v", err)
+	}
+
 	// Wrap the full node api to provide an adapted interface
-	radapter := NewRetrievalNode(lapi)
+	radapter := NewRetrievalNode(lapi, rtmkt.TestModeOn)
 	// Create an underlying ipfs node
 	ipfs, err := NewIpfsStore(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("Unable to start ipfs node: %v", err)
 	}
+
 	node := &MyelNode{
 		Ctx:     ctx,
 		Store:   ipfs,
+		Wallet:  w,
 		lcloser: lcloser,
 	}
 	// Create a retrieval network protocol from the ipfs node libp2p host
@@ -76,6 +91,9 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 		return nil, fmt.Errorf("Unable to start data transfer: %v", err)
 	}
 	if nt == NodeTypeClient || nt == NodeTypeFull {
+		if err := node.WalletImport("client.private"); err != nil {
+			return nil, err
+		}
 		// Create a new namespace for our metadata store
 		nds := namespace.Wrap(ds, datastore.NewKey("/retrieval/client"))
 		countKey := datastore.NewKey("/retrieval/client/dealcounter")
@@ -94,6 +112,9 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 		}
 	}
 	if nt == NodeTypeProvider || nt == NodeTypeFull {
+		if err := node.WalletImport("provider.private"); err != nil {
+			return nil, err
+		}
 		pds := namespace.Wrap(ds, datastore.NewKey("/retrieval/provider"))
 		// Making a dummy address for now
 		providerAddress, _ := address.NewIDAddress(uint64(99))
@@ -110,4 +131,25 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 	}
 
 	return node, nil
+}
+
+func (mn *MyelNode) WalletImport(path string) error {
+
+	fdata, err := ioutil.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("Unable to import private key file: %v", err)
+	}
+	var ki types.KeyInfo
+	data, err := hex.DecodeString(strings.TrimSpace(string(fdata)))
+	if err != nil {
+		return fmt.Errorf("Unable to decode hex string: %v", err)
+	}
+	if err := json.Unmarshal(data, &ki); err != nil {
+		return fmt.Errorf("Unable to unmarshal keyinfo: %v")
+	}
+	addr, err := mn.Wallet.Import(&ki)
+	if err := mn.Wallet.SetDefault(addr); err != nil {
+		return err
+	}
+	return nil
 }
