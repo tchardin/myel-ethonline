@@ -63,6 +63,7 @@ type RetrievalNode interface {
 type retrievalNode struct {
 	tmode TestMode
 	api   lapi.FullNode
+	pm    *paychManager
 }
 
 // Get the current chain head. Return its TipSetToken and its abi.ChainEpoch.
@@ -90,7 +91,7 @@ func (rn *retrievalNode) GetOrCreatePaymentChannel(ctx context.Context, clientAd
 	}
 	// TODO: respect the provided TipSetToken (a serialized TipSetKey) when
 	// querying the chain
-	ci, err := rn.api.PaychGet(ctx, clientAddress, minerAddress, clientFundsAvailable)
+	ci, err := rn.pm.PaychGet(ctx, clientAddress, minerAddress, clientFundsAvailable)
 	if err != nil {
 		return address.Undef, cid.Undef, err
 	}
@@ -105,7 +106,7 @@ func (rn *retrievalNode) AllocateLane(ctx context.Context, paymentChannel addres
 		fmt.Println("AllocateLane")
 		return 10, nil
 	}
-	return rn.api.PaychAllocateLane(ctx, paymentChannel)
+	return rn.pm.PaychAllocateLane(paymentChannel)
 }
 
 // CreatePaymentVoucher creates a new payment voucher in the given lane for a
@@ -119,7 +120,7 @@ func (rn *retrievalNode) CreatePaymentVoucher(ctx context.Context, paymentChanne
 	}
 	// TODO: respect the provided TipSetToken (a serialized TipSetKey) when
 	// querying the chain
-	voucher, err := rn.api.PaychVoucherCreate(ctx, paymentChannel, amount, lane)
+	voucher, err := rn.pm.PaychVoucherCreate(ctx, paymentChannel, amount, lane)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +136,7 @@ func (rn *retrievalNode) WaitForPaymentChannelReady(ctx context.Context, message
 		payCh, _ := address.NewActorAddress([]byte("testing"))
 		return payCh, nil
 	}
-	return rn.api.PaychGetWaitReady(ctx, messageCID)
+	return rn.pm.PaychGetWaitReady(ctx, messageCID)
 }
 
 func (rn *retrievalNode) CheckAvailableFunds(ctx context.Context, paymentChannel address.Address) (ChannelAvailableFunds, error) {
@@ -145,7 +146,7 @@ func (rn *retrievalNode) CheckAvailableFunds(ctx context.Context, paymentChannel
 			ConfirmedAmt: abi.NewTokenAmount(10000),
 		}, nil
 	}
-	channelAvailableFunds, err := rn.api.PaychAvailableFunds(ctx, paymentChannel)
+	channelAvailableFunds, err := rn.pm.PaychAvailableFunds(paymentChannel)
 	if err != nil {
 		return ChannelAvailableFunds{}, err
 	}
@@ -191,10 +192,10 @@ func (rn *retrievalNode) SavePaymentVoucher(ctx context.Context, paymentChannel 
 	}
 	// TODO: respect the provided TipSetToken (a serialized TipSetKey) when
 	// querying the chain
-	added, err := rn.api.PaychVoucherAdd(ctx, paymentChannel, voucher, proof, expectedAmount)
+	added, err := rn.pm.AddVoucherInbound(ctx, paymentChannel, voucher, proof, expectedAmount)
 	return added, err
 }
 
-func NewRetrievalNode(api lapi.FullNode, tm TestMode) RetrievalNode {
-	return &retrievalNode{tm, api}
+func NewRetrievalNode(api lapi.FullNode, pm *paychManager, tm TestMode) RetrievalNode {
+	return &retrievalNode{tm, api, pm}
 }

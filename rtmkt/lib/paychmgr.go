@@ -20,6 +20,7 @@ import (
 	"github.com/filecoin-project/lotus/chain/actors/builtin/paych"
 	"github.com/filecoin-project/lotus/chain/types"
 	"github.com/filecoin-project/lotus/chain/wallet"
+	"github.com/filecoin-project/lotus/lib/sigs"
 	"github.com/filecoin-project/lotus/node/modules/dtypes"
 	init2 "github.com/filecoin-project/specs-actors/v2/actors/builtin/init"
 	"github.com/ipfs/go-cid"
@@ -129,11 +130,13 @@ func (pm *paychManager) addAccessorToCache(from address.Address, to address.Addr
 	return ca
 }
 
-func NewPaychManager(ctx context.Context, node api.FullNode, w *wallet.Wallet) *paychManager {
+func NewPaychManager(ctx context.Context, node api.FullNode, w *wallet.Wallet, ds dtypes.MetadataDS) *paychManager {
+	store := NewChannelStore(ds)
 	return &paychManager{
 		ctx:      ctx,
 		api:      node,
 		wallet:   w,
+		store:    store,
 		channels: make(map[string]*channelAccessor),
 	}
 	// return &Manager{
@@ -160,6 +163,205 @@ func (pm *paychManager) PaychGet(ctx context.Context, from, to address.Address, 
 		Channel:      addr,
 		WaitSentinel: pcid,
 	}, nil
+}
+
+func (pm *paychManager) PaychAllocateLane(ch address.Address) (uint64, error) {
+	ca, err := pm.accessorByAddress(ch)
+	if err != nil {
+		return 0, fmt.Errorf("Unable to find channel to allocate lane: %v", err)
+	}
+	return ca.allocateLane(ch)
+}
+
+func (pm *paychManager) PaychVoucherCreate(ctx context.Context, ch address.Address, amt types.BigInt, lane uint64) (*api.VoucherCreateResult, error) {
+	vouch := paych.SignedVoucher{Amount: amt, Lane: lane}
+	ca, err := pm.accessorByAddress(ch)
+	if err != nil {
+		return nil, fmt.Errorf("Unable to find channel to create voucher for: %v", err)
+	}
+
+	return ca.createVoucher(ctx, ch, vouch)
+}
+
+func (pm *paychManager) PaychGetWaitReady(ctx context.Context, mcid cid.Cid) (address.Address, error) {
+	// Find the channel associated with the message CID
+	pm.lk.Lock()
+	ci, err := pm.store.ByMessageCid(mcid)
+	pm.lk.Unlock()
+
+	if err != nil {
+		if err == datastore.ErrNotFound {
+			return address.Undef, fmt.Errorf("Could not find wait msg cid %s", mcid)
+		}
+		return address.Undef, err
+	}
+
+	chanAccessor, err := pm.accessorByFromTo(ci.Control, ci.Target)
+	if err != nil {
+		return address.Undef, err
+	}
+
+	return chanAccessor.getPaychWaitReady(ctx, mcid)
+}
+
+func (pm *paychManager) PaychAvailableFunds(ch address.Address) (*api.ChannelAvailableFunds, error) {
+	ca, err := pm.accessorByAddress(ch)
+	if err != nil {
+		return nil, err
+	}
+
+	ci, err := ca.getChannelInfo(ch)
+	if err != nil {
+		return nil, err
+	}
+
+	return ca.availableFunds(ci.ChannelID)
+}
+
+var errProofNotSupported = fmt.Errorf("payment channel proof parameter is not supported")
+
+// AddVoucherInbound adds a voucher for an inbound channel.
+// If the channel is not in the store, fetches the channel from state (and checks that
+// the channel To address is owned by the wallet).
+func (pm *paychManager) AddVoucherInbound(ctx context.Context, ch address.Address, sv *paych.SignedVoucher, proof []byte, minDelta types.BigInt) (types.BigInt, error) {
+	if len(proof) > 0 {
+		return types.NewInt(0), errProofNotSupported
+	}
+	// Get an accessor for the channel, creating it from state if necessary
+	ca, err := pm.inboundChannelAccessor(ctx, ch)
+	if err != nil {
+		return types.BigInt{}, err
+	}
+	ca.lk.Lock()
+	defer ca.lk.Unlock()
+	return ca.addVoucherUnlocked(ctx, ch, sv, minDelta)
+}
+
+// inboundChannelAccessor gets an accessor for the given channel. The channel
+// must either exist in the store, or be an inbound channel that can be created
+// from state.
+func (pm *paychManager) inboundChannelAccessor(ctx context.Context, ch address.Address) (*channelAccessor, error) {
+	// Make sure channel is in store, or can be fetched from state, and that
+	// the channel To address is owned by the wallet
+	ci, err := pm.trackInboundChannel(ctx, ch)
+	if err != nil {
+		return nil, err
+	}
+
+	// This is an inbound channel, so To is the Control address (this node)
+	from := ci.Target
+	to := ci.Control
+	return pm.accessorByFromTo(from, to)
+}
+
+func (pm *paychManager) trackInboundChannel(ctx context.Context, ch address.Address) (*ChannelInfo, error) {
+	// Need to take an exclusive lock here so that channel operations can't run
+	// in parallel (see channelLock)
+	pm.lk.Lock()
+	defer pm.lk.Unlock()
+
+	// Check if channel is in store
+	ci, err := pm.store.ByAddress(ch)
+	if err == nil {
+		// Channel is in store, so it's already being tracked
+		return ci, nil
+	}
+
+	// If there's an error (besides channel not in store) return err
+	if err != ErrChannelNotTracked {
+		return nil, err
+	}
+
+	// Channel is not in store, so get channel from state
+	stateCi, err := pm.loadStateChannelInfo(ch, DirInbound)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check that channel To address is in wallet
+	to := stateCi.Control // Inbound channel so To addr is Control (this node)
+	toKey, err := pm.api.StateAccountKey(ctx, to, types.EmptyTSK)
+	if err != nil {
+		return nil, err
+	}
+	has, err := pm.wallet.HasKey(toKey)
+	if err != nil {
+		return nil, err
+	}
+	if !has {
+		msg := "cannot add voucher for channel %s: wallet does not have key for address %s"
+		return nil, fmt.Errorf(msg, ch, to)
+	}
+
+	// Save channel to store
+	return pm.store.TrackChannel(stateCi)
+}
+
+func (pm *paychManager) loadStateChannelInfo(ch address.Address, dir uint64) (*ChannelInfo, error) {
+	actorState, err := pm.api.StateReadState(pm.ctx, ch, types.EmptyTSK)
+	if err != nil {
+		return nil, fmt.Errorf("Unable to read actor state: %v", err)
+	}
+	as, ok := actorState.State.(paych.State)
+	if !ok {
+		return nil, fmt.Errorf("Unable to cast actor state to paych state")
+	}
+	f, err := as.From()
+	if err != nil {
+		return nil, err
+	}
+	from, err := pm.api.StateAccountKey(pm.ctx, f, types.EmptyTSK)
+	if err != nil {
+		return nil, fmt.Errorf("Unable to get account key for From actor state: %v", err)
+	}
+	t, err := as.To()
+	if err != nil {
+		return nil, err
+	}
+	to, err := pm.api.StateAccountKey(pm.ctx, t, types.EmptyTSK)
+	if err != nil {
+		return nil, fmt.Errorf("Unable to get account key for To actor state: %v", err)
+	}
+	nextLane, err := nextLaneFromState(as)
+	if err != nil {
+		return nil, fmt.Errorf("Unable to get next lane from state: %v", err)
+	}
+	ci := &ChannelInfo{
+		Channel:   &ch,
+		Direction: dir,
+		NextLane:  nextLane,
+	}
+	if dir == DirOutbound {
+		ci.Control = from
+		ci.Target = to
+	} else {
+		ci.Control = to
+		ci.Target = from
+	}
+	return ci, nil
+
+}
+
+func nextLaneFromState(st paych.State) (uint64, error) {
+	laneCount, err := st.LaneCount()
+	if err != nil {
+		return 0, err
+	}
+	if laneCount == 0 {
+		return 0, nil
+	}
+
+	maxID := uint64(0)
+	if err := st.ForEachLaneState(func(idx uint64, _ paych.LaneState) error {
+		if idx > maxID {
+			maxID = idx
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+
+	return maxID + 1, nil
 }
 
 type channelAccessor struct {
@@ -242,6 +444,13 @@ func (r *fundsReq) setMergeParent(m *mergedFundsReq) {
 	defer r.lk.Unlock()
 
 	r.merge = m
+}
+
+func (ca *channelAccessor) allocateLane(ch address.Address) (uint64, error) {
+	ca.lk.Lock()
+	defer ca.lk.Unlock()
+
+	return ca.store.AllocateLane(ch)
 }
 
 // mergedFundsReq merges together multiple add funds requests that are queued
@@ -404,12 +613,16 @@ func (ca *channelAccessor) currentAvailableFunds(channelID string, queuedAmt typ
 	totalRedeemed := types.NewInt(0)
 	if channelInfo.Channel != nil {
 		ch := *channelInfo.Channel
-		_, pchState, err := ca.sa.loadPaychActorState(ca.chctx, ch)
+		actorState, err := ca.api.StateReadState(ca.chctx, ch, types.EmptyTSK)
 		if err != nil {
 			return nil, err
 		}
+		as, ok := actorState.State.(paych.State)
+		if !ok {
+			return nil, fmt.Errorf("Unable to cast actorState to paych.State")
+		}
 
-		laneStates, err := ca.laneState(pchState, ch)
+		laneStates, err := ca.laneState(as, ch)
 		if err != nil {
 			return nil, err
 		}
@@ -433,6 +646,22 @@ func (ca *channelAccessor) currentAvailableFunds(channelID string, queuedAmt typ
 		QueuedAmt:           queuedAmt,
 		VoucherReedeemedAmt: totalRedeemed,
 	}, nil
+}
+
+func (ca *channelAccessor) loadPaychActorState(ch address.Address) (*types.Actor, paych.State, error) {
+	actor, err := ca.api.StateGetActor(ca.chctx, ch, types.EmptyTSK)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Unable to get actor: %v", err)
+	}
+	actorState, err := ca.api.StateReadState(ca.chctx, ch, types.EmptyTSK)
+	if err != nil {
+		return nil, nil, err
+	}
+	as, ok := actorState.State.(paych.State)
+	if !ok {
+		return nil, nil, fmt.Errorf("Unable to load paych actor state: could not cast interface")
+	}
+	return actor, as, nil
 }
 
 type laneState struct {
@@ -672,7 +901,7 @@ func (ca *channelAccessor) waitForPaychCreateMsg(channelID string, mcid cid.Cid)
 func (ca *channelAccessor) waitPaychCreateMsg(channelID string, mcid cid.Cid) error {
 	mwait, err := ca.api.StateWaitMsg(ca.chctx, mcid, build.MessageConfidence)
 	if err != nil {
-		fmt.Printf("wait msg: %w", err)
+		fmt.Printf("wait msg: %v", err)
 		return err
 	}
 
@@ -812,13 +1041,398 @@ func (ca *channelAccessor) waitAddFundsMsg(channelID string, mcid cid.Cid) error
 	return nil
 }
 
+// createVoucher creates a voucher with the given specification, setting its
+// nonce, signing the voucher and storing it in the local datastore.
+// If there are not enough funds in the channel to create the voucher, returns
+// the shortfall in funds.
+func (ca *channelAccessor) createVoucher(ctx context.Context, ch address.Address, voucher paych.SignedVoucher) (*api.VoucherCreateResult, error) {
+	ca.lk.Lock()
+	defer ca.lk.Unlock()
+
+	// Find the channel for the voucher
+	ci, err := ca.store.ByAddress(ch)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get channel info by address: %v", err)
+	}
+
+	// Set the voucher channel
+	sv := &voucher
+	sv.ChannelAddr = ch
+
+	// Get the next nonce on the given lane
+	sv.Nonce = ca.nextNonceForLane(ci, voucher.Lane)
+
+	// Sign the voucher
+	vb, err := sv.SigningBytes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get voucher signing bytes: %v", err)
+	}
+
+	sig, err := ca.api.WalletSign(ctx, ci.Control, vb)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign voucher: %v", err)
+	}
+	sv.Signature = sig
+
+	// Store the voucher
+	if _, err := ca.addVoucherUnlocked(ctx, ch, sv, types.NewInt(0)); err != nil {
+		// If there are not enough funds in the channel to cover the voucher,
+		// return a voucher create result with the shortfall
+		if ife, ok := err.(insufficientFundsErr); ok {
+			return &api.VoucherCreateResult{
+				Shortfall: ife.Shortfall(),
+			}, nil
+		}
+
+		return nil, fmt.Errorf("failed to persist voucher: %v", err)
+	}
+
+	return &api.VoucherCreateResult{Voucher: sv, Shortfall: types.NewInt(0)}, nil
+}
+
+func (ca *channelAccessor) nextNonceForLane(ci *ChannelInfo, lane uint64) uint64 {
+	var maxnonce uint64
+	for _, v := range ci.Vouchers {
+		if v.Voucher.Lane == lane {
+			if v.Voucher.Nonce > maxnonce {
+				maxnonce = v.Voucher.Nonce
+			}
+		}
+	}
+
+	return maxnonce + 1
+}
+
+func (ca *channelAccessor) addVoucherUnlocked(ctx context.Context, ch address.Address, sv *paych.SignedVoucher, minDelta types.BigInt) (types.BigInt, error) {
+	ci, err := ca.store.ByAddress(ch)
+	if err != nil {
+		return types.BigInt{}, err
+	}
+
+	// Check if the voucher has already been added
+	for _, v := range ci.Vouchers {
+		eq, err := cborrpc.Equals(sv, v.Voucher)
+		if err != nil {
+			return types.BigInt{}, err
+		}
+		if eq {
+			// Ignore the duplicate voucher.
+			fmt.Println("AddVoucher: voucher re-added")
+			return types.NewInt(0), nil
+		}
+
+	}
+
+	// Check voucher validity
+	laneStates, err := ca.checkVoucherValidUnlocked(ctx, ch, sv)
+	if err != nil {
+		return types.NewInt(0), err
+	}
+
+	// The change in value is the delta between the voucher amount and
+	// the highest previous voucher amount for the lane
+	laneState, exists := laneStates[sv.Lane]
+	redeemed := big.NewInt(0)
+	if exists {
+		redeemed, err = laneState.Redeemed()
+		if err != nil {
+			return types.NewInt(0), err
+		}
+	}
+
+	delta := types.BigSub(sv.Amount, redeemed)
+	if minDelta.GreaterThan(delta) {
+		return delta, fmt.Errorf("addVoucher: supplied token amount too low; minD=%s, D=%s; laneAmt=%s; v.Amt=%s", minDelta, delta, redeemed, sv.Amount)
+	}
+
+	ci.Vouchers = append(ci.Vouchers, &VoucherInfo{
+		Voucher: sv,
+	})
+
+	if ci.NextLane <= sv.Lane {
+		ci.NextLane = sv.Lane + 1
+	}
+
+	return delta, ca.store.putChannelInfo(ci)
+}
+
+func (ca *channelAccessor) checkVoucherValidUnlocked(ctx context.Context, ch address.Address, sv *paych.SignedVoucher) (map[uint64]paych.LaneState, error) {
+	if sv.ChannelAddr != ch {
+		return nil, fmt.Errorf("voucher ChannelAddr doesn't match channel address, got %s, expected %s", sv.ChannelAddr, ch)
+	}
+
+	// Load payment channel actor state
+	act, pchState, err := ca.loadPaychActorState(ch)
+	if err != nil {
+		return nil, err
+	}
+
+	// Load channel "From" account actor state
+	f, err := pchState.From()
+	if err != nil {
+		return nil, err
+	}
+
+	from, err := ca.api.StateAccountKey(ctx, f, types.EmptyTSK)
+	if err != nil {
+		return nil, err
+	}
+
+	// verify voucher signature
+	vb, err := sv.SigningBytes()
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO: technically, either party may create and sign a voucher.
+	// However, for now, we only accept them from the channel creator.
+	// More complex handling logic can be added later
+	if err := sigs.Verify(sv.Signature, from, vb); err != nil {
+		return nil, err
+	}
+
+	// Check the voucher against the highest known voucher nonce / value
+	laneStates, err := ca.laneState(pchState, ch)
+	if err != nil {
+		return nil, err
+	}
+
+	// If the new voucher nonce value is less than the highest known
+	// nonce for the lane
+	ls, lsExists := laneStates[sv.Lane]
+	if lsExists {
+		n, err := ls.Nonce()
+		if err != nil {
+			return nil, err
+		}
+
+		if sv.Nonce <= n {
+			return nil, fmt.Errorf("nonce too low")
+		}
+
+		// If the voucher amount is less than the highest known voucher amount
+		r, err := ls.Redeemed()
+		if err != nil {
+			return nil, err
+		}
+		if sv.Amount.LessThanEqual(r) {
+			return nil, fmt.Errorf("voucher amount is lower than amount for voucher with lower nonce")
+		}
+	}
+
+	// Total redeemed is the total redeemed amount for all lanes, including
+	// the new voucher
+	// eg
+	//
+	// lane 1 redeemed:            3
+	// lane 2 redeemed:            2
+	// voucher for lane 1:         5
+	//
+	// Voucher supersedes lane 1 redeemed, therefore
+	// effective lane 1 redeemed:  5
+	//
+	// lane 1:  5
+	// lane 2:  2
+	//          -
+	// total:   7
+	totalRedeemed, err := ca.totalRedeemedWithVoucher(laneStates, sv)
+	if err != nil {
+		return nil, err
+	}
+
+	// Total required balance must not exceed actor balance
+	if act.Balance.LessThan(totalRedeemed) {
+		return nil, newErrInsufficientFunds(types.BigSub(totalRedeemed, act.Balance))
+	}
+
+	if len(sv.Merges) != 0 {
+		return nil, fmt.Errorf("dont currently support paych lane merges")
+	}
+
+	return laneStates, nil
+}
+
+// Get the total redeemed amount across all lanes, after applying the voucher
+func (ca *channelAccessor) totalRedeemedWithVoucher(laneStates map[uint64]paych.LaneState, sv *paych.SignedVoucher) (big.Int, error) {
+	// TODO: merges
+	if len(sv.Merges) != 0 {
+		return big.Int{}, fmt.Errorf("dont currently support paych lane merges")
+	}
+
+	total := big.NewInt(0)
+	for _, ls := range laneStates {
+		r, err := ls.Redeemed()
+		if err != nil {
+			return big.Int{}, err
+		}
+		total = big.Add(total, r)
+	}
+
+	lane, ok := laneStates[sv.Lane]
+	if ok {
+		// If the voucher is for an existing lane, and the voucher nonce
+		// is higher than the lane nonce
+		n, err := lane.Nonce()
+		if err != nil {
+			return big.Int{}, err
+		}
+
+		if sv.Nonce > n {
+			// Add the delta between the redeemed amount and the voucher
+			// amount to the total
+			r, err := lane.Redeemed()
+			if err != nil {
+				return big.Int{}, err
+			}
+
+			delta := big.Sub(sv.Amount, r)
+			total = big.Add(total, delta)
+		}
+	} else {
+		// If the voucher is *not* for an existing lane, just add its
+		// value (implicitly a new lane will be created for the voucher)
+		total = big.Add(total, sv.Amount)
+	}
+
+	return total, nil
+}
+
+// getPaychWaitReady waits for a the response to the message with the given cid
+func (ca *channelAccessor) getPaychWaitReady(ctx context.Context, mcid cid.Cid) (address.Address, error) {
+	ca.lk.Lock()
+
+	// First check if the message has completed
+	msgInfo, err := ca.store.GetMessage(mcid)
+	if err != nil {
+		ca.lk.Unlock()
+
+		return address.Undef, err
+	}
+
+	// If the create channel / add funds message failed, return an error
+	if len(msgInfo.Err) > 0 {
+		ca.lk.Unlock()
+
+		return address.Undef, fmt.Errorf(msgInfo.Err)
+	}
+
+	// If the message has completed successfully
+	if msgInfo.Received {
+		ca.lk.Unlock()
+
+		// Get the channel address
+		ci, err := ca.store.ByMessageCid(mcid)
+		if err != nil {
+			return address.Undef, err
+		}
+
+		if ci.Channel == nil {
+			panic(fmt.Sprintf("create / add funds message %s succeeded but channelInfo.Channel is nil", mcid))
+		}
+		return *ci.Channel, nil
+	}
+
+	// The message hasn't completed yet so wait for it to complete
+	promise := ca.msgPromise(ctx, mcid)
+
+	// Unlock while waiting
+	ca.lk.Unlock()
+
+	select {
+	case res := <-promise:
+		return res.channel, res.err
+	case <-ctx.Done():
+		return address.Undef, ctx.Err()
+	}
+}
+
+type onMsgRes struct {
+	channel address.Address
+	err     error
+}
+
+// msgPromise returns a channel that receives the result of the message with
+// the given CID
+func (ca *channelAccessor) msgPromise(ctx context.Context, mcid cid.Cid) chan onMsgRes {
+	promise := make(chan onMsgRes)
+	triggerUnsub := make(chan struct{})
+	unsub := ca.msgListeners.onMsgComplete(mcid, func(err error) {
+		close(triggerUnsub)
+
+		// Use a go-routine so as not to block the event handler loop
+		go func() {
+			res := onMsgRes{err: err}
+			if res.err == nil {
+				// Get the channel associated with the message cid
+				ci, err := ca.store.ByMessageCid(mcid)
+				if err != nil {
+					res.err = err
+				} else {
+					res.channel = *ci.Channel
+				}
+			}
+
+			// Pass the result to the caller
+			select {
+			case promise <- res:
+			case <-ctx.Done():
+			}
+		}()
+	})
+
+	// Unsubscribe when the message is received or the context is done
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-triggerUnsub:
+		}
+
+		unsub()
+	}()
+
+	return promise
+}
+
+func (ca *channelAccessor) getChannelInfo(addr address.Address) (*ChannelInfo, error) {
+	ca.lk.Lock()
+	defer ca.lk.Unlock()
+
+	return ca.store.ByAddress(addr)
+}
+
+func (ca *channelAccessor) availableFunds(channelID string) (*api.ChannelAvailableFunds, error) {
+	return ca.processQueue(channelID)
+}
+
 var ErrChannelNotTracked = errors.New("channel not tracked")
+
+// insufficientFundsErr indicates that there are not enough funds in the
+// channel to create a voucher
+type insufficientFundsErr interface {
+	Shortfall() types.BigInt
+}
+
+type ErrInsufficientFunds struct {
+	shortfall types.BigInt
+}
+
+func newErrInsufficientFunds(shortfall types.BigInt) *ErrInsufficientFunds {
+	return &ErrInsufficientFunds{shortfall: shortfall}
+}
+
+func (e *ErrInsufficientFunds) Error() string {
+	return fmt.Sprintf("not enough funds in channel to cover voucher - shortfall: %d", e.shortfall)
+}
+
+func (e *ErrInsufficientFunds) Shortfall() types.BigInt {
+	return e.shortfall
+}
 
 type channelStore struct {
 	ds datastore.Batching
 }
 
-func NewStore(ds dtypes.MetadataDS) *channelStore {
+func NewChannelStore(ds dtypes.MetadataDS) *channelStore {
 	ds = namespace.Wrap(ds, datastore.NewKey("/paych"))
 	return &channelStore{
 		ds: ds,
@@ -982,6 +1596,23 @@ func (s *channelStore) SaveMessageResult(mcid cid.Cid, msgErr error) error {
 	return s.ds.Put(k, b)
 }
 
+// ByMessageCid gets the channel associated with a message
+func (s *channelStore) ByMessageCid(mcid cid.Cid) (*ChannelInfo, error) {
+	minfo, err := s.GetMessage(mcid)
+	if err != nil {
+		return nil, err
+	}
+
+	ci, err := s.findChan(func(ci *ChannelInfo) bool {
+		return ci.ChannelID == minfo.ChannelID
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return ci, err
+}
+
 // GetMessage gets the message info for a given message CID
 func (s *channelStore) GetMessage(mcid cid.Cid) (*MsgInfo, error) {
 	k := dskeyForMsg(mcid)
@@ -1102,6 +1733,38 @@ func (s *channelStore) findChans(filter func(*ChannelInfo) bool, max int) ([]Cha
 	}
 
 	return matches, nil
+}
+
+// AllocateLane allocates a new lane for the given channel
+func (s *channelStore) AllocateLane(ch address.Address) (uint64, error) {
+	ci, err := s.ByAddress(ch)
+	if err != nil {
+		return 0, err
+	}
+
+	out := ci.NextLane
+	ci.NextLane++
+
+	return out, s.putChannelInfo(ci)
+}
+
+// TrackChannel stores a channel, returning an error if the channel was already
+// being tracked
+func (s *channelStore) TrackChannel(ci *ChannelInfo) (*ChannelInfo, error) {
+	_, err := s.ByAddress(*ci.Channel)
+	switch err {
+	default:
+		return nil, err
+	case nil:
+		return nil, fmt.Errorf("already tracking channel: %s", ci.Channel)
+	case ErrChannelNotTracked:
+		err = s.putChannelInfo(ci)
+		if err != nil {
+			return nil, err
+		}
+
+		return s.ByAddress(*ci.Channel)
+	}
 }
 
 // TODO: This is a hack to get around not being able to CBOR marshall a nil

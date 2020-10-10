@@ -56,26 +56,12 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Unable to start lotus rpc: %v", err)
 	}
-	memks := wallet.NewMemKeyStore()
-	w, err := wallet.NewWallet(memks)
-	if err != nil {
-		return nil, fmt.Errorf("Unable to create new wallet: %v", err)
-	}
-
-	// Wrap the full node api to provide an adapted interface
-	radapter := NewRetrievalNode(lapi, TestModeOn)
 	// Create an underlying ipfs node
 	ipfs, err := NewIpfsStore(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("Unable to start ipfs node: %v", err)
 	}
 
-	node := &MyelNode{
-		Ctx:     ctx,
-		Store:   ipfs,
-		Wallet:  w,
-		lcloser: lcloser,
-	}
 	// Create a retrieval network protocol from the ipfs node libp2p host
 	net := NewFromLibp2pHost(ipfs.node.PeerHost)
 	// Get the Datastore from ipfs
@@ -91,6 +77,22 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 	err = dataTransfer.Start(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("Unable to start data transfer: %v", err)
+	}
+	memks := wallet.NewMemKeyStore()
+	w, err := wallet.NewWallet(memks)
+	if err != nil {
+		return nil, fmt.Errorf("Unable to create new wallet: %v", err)
+	}
+	paychMgr := NewPaychManager(ctx, lapi, w, ds)
+
+	// Wrap the full node api to provide an adapted interface
+	radapter := NewRetrievalNode(lapi, paychMgr, TestModeOff)
+
+	node := &MyelNode{
+		Ctx:     ctx,
+		Store:   ipfs,
+		Wallet:  w,
+		lcloser: lcloser,
 	}
 	if nt == NodeTypeClient || nt == NodeTypeFull {
 		if _, err := node.WalletImport("client.private"); err != nil {

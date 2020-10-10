@@ -60,7 +60,7 @@ func main() {
 	clientPaymentChannel, _ := address.NewIDAddress(uint64(10))
 	paymentInterval := uint64(10000)
 	paymentIntervalIncrease := uint64(1000)
-	pricePerByte := abi.NewTokenAmount(1000)
+	pricePerByte := abi.NewTokenAmount(3)
 	params, _ := rtmkt.NewParams(pricePerByte, paymentInterval, paymentIntervalIncrease)
 	total := big.Mul(pricePerByte, abi.NewTokenAmount(int64(res.Size)))
 
