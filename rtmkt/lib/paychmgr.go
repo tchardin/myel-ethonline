@@ -15,7 +15,6 @@ import (
 	cborrpc "github.com/filecoin-project/go-cbor-util"
 	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/big"
-	"github.com/filecoin-project/go-state-types/network"
 	"github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/build"
 	"github.com/filecoin-project/lotus/chain/actors"
@@ -45,38 +44,6 @@ type paychManager struct {
 
 	lk       sync.RWMutex
 	channels map[string]*channelAccessor
-}
-
-func (pm *paychManager) StateAccountKey(ctx context.Context, addr address.Address, tip types.TipSetKey) (address.Address, error) {
-	return address.TestAddress, nil
-}
-
-func (pm *paychManager) StateWaitMsg(ctx context.Context, msg cid.Cid, confidence uint64) (*api.MsgLookup, error) {
-	return nil, nil
-}
-
-func (pm *paychManager) MpoolPushMessage(ctx context.Context, msg *types.Message, maxFee *api.MessageSendSpec) (*types.SignedMessage, error) {
-	return nil, nil
-}
-
-func (pm *paychManager) WalletHas(ctx context.Context, addr address.Address) (bool, error) {
-	return false, nil
-}
-
-func (pm *paychManager) StateNetworkVersion(context.Context, types.TipSetKey) (network.Version, error) {
-	return network.Version0, nil
-}
-
-func (pm *paychManager) ResolveToKeyAddress(ctx context.Context, addr address.Address, ts *types.TipSet) (address.Address, error) {
-	return address.TestAddress, nil
-}
-
-func (pm *paychManager) GetPaychState(ctx context.Context, addr address.Address, ts *types.TipSet) (*types.Actor, paych.State, error) {
-	return nil, nil, nil
-}
-
-func (pm *paychManager) Call(ctx context.Context, msg *types.Message, ts *types.TipSet) (*api.InvocResult, error) {
-	return nil, nil
 }
 
 func (pm *paychManager) accessorByFromTo(from address.Address, to address.Address) (*channelAccessor, error) {
@@ -227,6 +194,85 @@ func (pm *paychManager) PaychAvailableFunds(ch address.Address) (*api.ChannelAva
 	}
 
 	return ca.availableFunds(ci.ChannelID)
+}
+
+func (pm *paychManager) ListChannels() ([]address.Address, error) {
+	// Need to take an exclusive lock here so that channel operations can't run
+	// in parallel (see channelLock)
+	pm.lk.Lock()
+	defer pm.lk.Unlock()
+
+	return pm.store.ListChannels()
+}
+
+func (pm *paychManager) ListVouchers(ctx context.Context, ch address.Address) ([]*VoucherInfo, error) {
+	ca, err := pm.accessorByAddress(ch)
+	if err != nil {
+		return nil, err
+	}
+	return ca.listVouchers(ctx, ch)
+}
+
+func (pm *paychManager) RedeemAll(ctx context.Context) error {
+	chs, err := pm.ListChannels()
+	if err != nil {
+		return err
+	}
+	for _, ch := range chs {
+		bestByLane, err := pm.BestSpendableByLane(ctx, ch)
+		if err != nil {
+			fmt.Printf("Error checking spendable vouchers: %v", err)
+			continue
+		}
+		var wg sync.WaitGroup
+		wg.Add(len(bestByLane))
+		for _, voucher := range bestByLane {
+			msgCid, err := pm.SubmitVoucher(ctx, ch, voucher, nil, nil)
+			if err != nil {
+				fmt.Printf("Unable to submit voucher: %v", err)
+				continue
+			}
+			go func(voucher *paych.SignedVoucher, submitMessageCID cid.Cid) {
+				defer wg.Done()
+				msgLookup, err := pm.api.StateWaitMsg(ctx, submitMessageCID, build.MessageConfidence)
+				if err != nil {
+					fmt.Printf("Error waiting for voucher submit: %v", err)
+				}
+				if msgLookup.Receipt.ExitCode != 0 {
+					fmt.Printf("Failed to submit voucher: %v", err)
+				}
+			}(voucher, msgCid)
+		}
+		wg.Wait()
+	}
+	return nil
+}
+
+func (pm *paychManager) BestSpendableByLane(ctx context.Context, ch address.Address) (map[uint64]*paych.SignedVoucher, error) {
+	vouchers, err := pm.ListVouchers(ctx, ch)
+	if err != nil {
+		return nil, err
+	}
+
+	bestByLane := make(map[uint64]*paych.SignedVoucher)
+	for _, vi := range vouchers {
+		// TODO: spendable, err := PaychVoucherCheckSpendable(ctx, ch, voucher, nil, nil)
+		if bestByLane[vi.Voucher.Lane] == nil || vi.Voucher.Amount.GreaterThan(bestByLane[vi.Voucher.Lane].Amount) {
+			bestByLane[vi.Voucher.Lane] = vi.Voucher
+		}
+	}
+	return bestByLane, nil
+}
+
+func (pm *paychManager) SubmitVoucher(ctx context.Context, ch address.Address, sv *paych.SignedVoucher, secret []byte, proof []byte) (cid.Cid, error) {
+	if len(proof) > 0 {
+		return cid.Undef, errProofNotSupported
+	}
+	ca, err := pm.accessorByAddress(ch)
+	if err != nil {
+		return cid.Undef, err
+	}
+	return ca.submitVoucher(ctx, ch, sv, secret)
 }
 
 var errProofNotSupported = fmt.Errorf("payment channel proof parameter is not supported")
@@ -942,13 +988,20 @@ func (ca *channelAccessor) processTask(ctx context.Context, amt types.BigInt) *p
 	return &paychFundsRes{channel: *channelInfo.Channel, mcid: *mcid}
 }
 
-func (ca *channelAccessor) createPaych(ctx context.Context, amt types.BigInt) (cid.Cid, error) {
+func (ca *channelAccessor) messageBuilder(ctx context.Context, from address.Address) (paych.MessageBuilder, error) {
 	nwVersion, err := ca.api.StateNetworkVersion(ctx, types.EmptyTSK)
+	if err != nil {
+		return nil, err
+	}
+
+	return paych.Message(actors.VersionForNetwork(nwVersion), from), nil
+}
+
+func (ca *channelAccessor) createPaych(ctx context.Context, amt types.BigInt) (cid.Cid, error) {
+	mb, err := ca.messageBuilder(ctx, ca.from)
 	if err != nil {
 		return cid.Undef, err
 	}
-
-	mb := paych.Message(actors.VersionForNetwork(nwVersion), ca.from)
 
 	msg, err := mb.Create(ca.to, amt)
 	cp := *msg
@@ -957,38 +1010,9 @@ func (ca *channelAccessor) createPaych(ctx context.Context, amt types.BigInt) (c
 		return cid.Undef, err
 	}
 
-	// TODO: Hard coding GasLimit here as next method errors out trying to figure it out:
-	// message execution failed: exit 17, reason: constructor failed (RetCode=17)
-	msg.GasLimit = int64(8264670)
-
-	msg, err = ca.api.GasEstimateMessageGas(ctx, msg, nil, types.EmptyTSK)
+	smsg, err := ca.mpoolPush(ctx, msg)
 	if err != nil {
 		return cid.Undef, err
-	}
-	// TODO save nonce in local data store
-	nonce, err := ca.api.MpoolGetNonce(ctx, msg.From)
-	if err != nil {
-		return cid.Undef, err
-	}
-
-	msg.Nonce = nonce
-	mbl, err := msg.ToStorageBlock()
-	if err != nil {
-		return cid.Undef, err
-	}
-
-	sig, err := ca.wal.Sign(ctx, msg.From, mbl.Cid().Bytes())
-	if err != nil {
-		return cid.Undef, fmt.Errorf("Unable to sign msg: %v", err)
-	}
-
-	smsg := &types.SignedMessage{
-		Message:   *msg,
-		Signature: *sig,
-	}
-
-	if _, err := ca.api.MpoolPush(ctx, smsg); err != nil {
-		return cid.Undef, fmt.Errorf("MpoolPush failed with error: %v", err)
 	}
 
 	ci, err := ca.store.CreateChannel(ca.from, ca.to, smsg.Cid(), amt)
@@ -1057,6 +1081,43 @@ func (ca *channelAccessor) waitPaychCreateMsg(channelID string, mcid cid.Cid) er
 	return nil
 }
 
+// mpoolPush preps and sends a message to mpool
+func (ca *channelAccessor) mpoolPush(ctx context.Context, msg *types.Message) (*types.SignedMessage, error) {
+	// TODO: See if we can make gas estimate method work properly sometime
+	msg.GasLimit = int64(8264670)
+
+	msg, err := ca.api.GasEstimateMessageGas(ctx, msg, nil, types.EmptyTSK)
+	if err != nil {
+		return nil, err
+	}
+	// TODO save nonce from local data store
+	nonce, err := ca.api.MpoolGetNonce(ctx, msg.From)
+	if err != nil {
+		return nil, err
+	}
+
+	msg.Nonce = nonce
+	mbl, err := msg.ToStorageBlock()
+	if err != nil {
+		return nil, err
+	}
+
+	sig, err := ca.wal.Sign(ctx, msg.From, mbl.Cid().Bytes())
+	if err != nil {
+		return nil, err
+	}
+
+	smsg := &types.SignedMessage{
+		Message:   *msg,
+		Signature: *sig,
+	}
+
+	if _, err := ca.api.MpoolPush(ctx, smsg); err != nil {
+		return nil, fmt.Errorf("MpoolPush failed with error: %v", err)
+	}
+	return smsg, nil
+}
+
 // addFunds sends a message to add funds to the channel and returns the message cid
 func (ca *channelAccessor) addFunds(ctx context.Context, channelInfo *ChannelInfo, amt types.BigInt) (*cid.Cid, error) {
 	msg := &types.Message{
@@ -1066,7 +1127,7 @@ func (ca *channelAccessor) addFunds(ctx context.Context, channelInfo *ChannelInf
 		Method: 0,
 	}
 
-	smsg, err := ca.api.MpoolPushMessage(ctx, msg, nil)
+	smsg, err := ca.mpoolPush(ctx, msg)
 	if err != nil {
 		return nil, err
 	}
@@ -1410,6 +1471,15 @@ func (ca *channelAccessor) totalRedeemedWithVoucher(laneStates map[uint64]paych.
 	return total, nil
 }
 
+func (ca *channelAccessor) listVouchers(ctx context.Context, ch address.Address) ([]*VoucherInfo, error) {
+	ca.lk.Lock()
+	defer ca.lk.Unlock()
+
+	// TODO: just having a passthrough method like this feels odd. Seems like
+	// there should be some filtering we're doing here
+	return ca.store.VouchersForPaych(ch)
+}
+
 // getPaychWaitReady waits for a the response to the message with the given cid
 func (ca *channelAccessor) getPaychWaitReady(ctx context.Context, mcid cid.Cid) (address.Address, error) {
 	ca.lk.Lock()
@@ -1517,6 +1587,64 @@ func (ca *channelAccessor) availableFunds(channelID string) (*api.ChannelAvailab
 	return ca.processQueue(channelID)
 }
 
+func (ca *channelAccessor) submitVoucher(ctx context.Context, ch address.Address, sv *paych.SignedVoucher, secret []byte) (cid.Cid, error) {
+	ca.lk.Lock()
+	defer ca.lk.Unlock()
+
+	ci, err := ca.store.ByAddress(ch)
+	if err != nil {
+		return cid.Undef, err
+	}
+
+	has, err := ci.hasVoucher(sv)
+	if err != nil {
+		return cid.Undef, err
+	}
+
+	// If the channel has the voucher
+	if has {
+		// Check that the voucher hasn't already been submitted
+		submitted, err := ci.wasVoucherSubmitted(sv)
+		if err != nil {
+			return cid.Undef, err
+		}
+		if submitted {
+			return cid.Undef, fmt.Errorf("cannot submit voucher that has already been submitted")
+		}
+	}
+
+	mb, err := ca.messageBuilder(ctx, ci.Control)
+	if err != nil {
+		return cid.Undef, err
+	}
+
+	msg, err := mb.Update(ch, sv, secret)
+	if err != nil {
+		return cid.Undef, err
+	}
+
+	smsg, err := ca.mpoolPush(ctx, msg)
+	if err != nil {
+		return cid.Undef, err
+	}
+
+	// If the channel didn't already have the voucher
+	if !has {
+		// Add the voucher to the channel
+		ci.Vouchers = append(ci.Vouchers, &VoucherInfo{
+			Voucher: sv,
+		})
+	}
+
+	// Mark the voucher and any lower-nonce vouchers as having been submitted
+	err = ca.store.MarkVoucherSubmitted(ci, sv)
+	if err != nil {
+		return cid.Undef, err
+	}
+
+	return smsg.Cid(), nil
+}
+
 var ErrChannelNotTracked = errors.New("channel not tracked")
 
 // insufficientFundsErr indicates that there are not enough funds in the
@@ -1613,6 +1741,38 @@ func (ci *ChannelInfo) to() address.Address {
 		return ci.Target
 	}
 	return ci.Control
+}
+
+// infoForVoucher gets the VoucherInfo for the given voucher.
+// returns nil if the channel doesn't have the voucher.
+func (ci *ChannelInfo) infoForVoucher(sv *paych.SignedVoucher) (*VoucherInfo, error) {
+	for _, v := range ci.Vouchers {
+		eq, err := cborrpc.Equals(sv, v.Voucher)
+		if err != nil {
+			return nil, err
+		}
+		if eq {
+			return v, nil
+		}
+	}
+	return nil, nil
+}
+
+func (ci *ChannelInfo) hasVoucher(sv *paych.SignedVoucher) (bool, error) {
+	vi, err := ci.infoForVoucher(sv)
+	return vi != nil, err
+}
+
+// wasVoucherSubmitted returns true if the voucher has been submitted
+func (ci *ChannelInfo) wasVoucherSubmitted(sv *paych.SignedVoucher) (bool, error) {
+	vi, err := ci.infoForVoucher(sv)
+	if err != nil {
+		return false, err
+	}
+	if vi == nil {
+		return false, fmt.Errorf("cannot submit voucher that has not been added to channel")
+	}
+	return vi.Submitted, nil
 }
 
 // MsgInfo stores information about a create channel / add funds message
@@ -1878,6 +2038,57 @@ func (s *channelStore) TrackChannel(ci *ChannelInfo) (*ChannelInfo, error) {
 
 		return s.ByAddress(*ci.Channel)
 	}
+}
+
+// ListChannels returns the addresses of all channels that have been created
+func (s *channelStore) ListChannels() ([]address.Address, error) {
+	cis, err := s.findChans(func(ci *ChannelInfo) bool {
+		return ci.Channel != nil
+	}, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	addrs := make([]address.Address, 0, len(cis))
+	for _, ci := range cis {
+		addrs = append(addrs, *ci.Channel)
+	}
+
+	return addrs, nil
+}
+
+// markVoucherSubmitted marks the voucher, and any vouchers of lower nonce
+// in the same lane, as being submitted.
+// Note: This method doesn't write anything to the store.
+func (ci *ChannelInfo) markVoucherSubmitted(sv *paych.SignedVoucher) error {
+	vi, err := ci.infoForVoucher(sv)
+	if err != nil {
+		return err
+	}
+	if vi == nil {
+		return fmt.Errorf("cannot submit voucher that has not been added to channel")
+	}
+
+	// Mark the voucher as submitted
+	vi.Submitted = true
+
+	// Mark lower-nonce vouchers in the same lane as submitted (lower-nonce
+	// vouchers are superseded by the submitted voucher)
+	for _, vi := range ci.Vouchers {
+		if vi.Voucher.Lane == sv.Lane && vi.Voucher.Nonce < sv.Nonce {
+			vi.Submitted = true
+		}
+	}
+
+	return nil
+}
+
+func (ps *channelStore) MarkVoucherSubmitted(ci *ChannelInfo, sv *paych.SignedVoucher) error {
+	err := ci.markVoucherSubmitted(sv)
+	if err != nil {
+		return err
+	}
+	return ps.putChannelInfo(ci)
 }
 
 // TODO: This is a hack to get around not being able to CBOR marshall a nil

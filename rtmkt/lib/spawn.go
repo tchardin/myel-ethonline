@@ -42,6 +42,7 @@ type MyelNode struct {
 	Client   RetrievalClient
 	Provider RetrievalProvider
 	Wallet   *wallet.Wallet
+	PaychMgr *paychManager
 	lcloser  jsonrpc.ClientCloser
 }
 
@@ -94,10 +95,11 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 	radapter := NewRetrievalNode(lapi, paychMgr, TestModeOff)
 
 	node := &MyelNode{
-		Ctx:     ctx,
-		Store:   ipfs,
-		Wallet:  w,
-		lcloser: lcloser,
+		Ctx:      ctx,
+		Store:    ipfs,
+		Wallet:   w,
+		PaychMgr: paychMgr,
+		lcloser:  lcloser,
 	}
 	if nt == NodeTypeClient || nt == NodeTypeFull {
 		if _, err := node.WalletImport("client.private"); err != nil {

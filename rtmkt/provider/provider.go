@@ -36,7 +36,27 @@ func main() {
 		log.Info().
 			Str("ProviderEvent", rtmkt.ProviderEvents[event]).
 			Interface("ProviderDealStatus", rtmkt.DealStatuses[state.Status]).
+			Uint64("TotalSent", state.TotalSent).
+			Str("FundsReceived", state.FundsReceived.String()).
 			Msg("Updating")
+
+		if event == rtmkt.ProviderEventComplete {
+			chs, err := n.PaychMgr.ListChannels()
+			if err != nil {
+				log.Error().Err(err).Msg("Unable to list channels")
+				return
+			}
+			for _, ch := range chs {
+				vchs, err := n.PaychMgr.ListVouchers(n.Ctx, ch)
+				if err != nil {
+					log.Error().Err(err).Msg("Listing vouchers")
+					continue
+				}
+				for _, vch := range vchs {
+					log.Info().Interface("Voucher", vch.Voucher).Msg("Saved")
+				}
+			}
+		}
 	})
 
 	addr, err := n.Wallet.GetDefault()

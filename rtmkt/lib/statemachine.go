@@ -160,6 +160,21 @@ func CheckFunds(ctx fsm.Context, environment ClientDealEnvironment, deal ClientD
 	return ctx.Trigger(ClientEventPaymentChannelAddingFunds, *availableFunds.PendingWaitSentinel, deal.PaymentInfo.PayCh)
 }
 
+func ReAddFunds(ctx fsm.Context, environment ClientDealEnvironment, deal ClientDealState) error {
+	tok, _, err := environment.Node().GetChainHead(ctx.Context())
+	if err != nil {
+		return ctx.Trigger(ClientEventPaymentChannelErrored, err)
+	}
+
+	paych, msgCID, err := environment.Node().GetOrCreatePaymentChannel(ctx.Context(), deal.ClientWallet, deal.MinerWallet, deal.VoucherShortfall, tok)
+	if err != nil {
+		fmt.Printf("Unable to readd funds to payment channel: %v", err)
+		return ctx.Trigger(ClientEventPaymentChannelErrored, err)
+	}
+
+	return ctx.Trigger(ClientEventPaymentChannelAddingFunds, msgCID, paych)
+}
+
 // ClientCancelDeal clears a deal that went wrong for an unknown reason
 func ClientCancelDeal(ctx fsm.Context, environment ClientDealEnvironment, deal ClientDealState) error {
 	// Read next response (or fail)
@@ -242,7 +257,7 @@ var FsmClientEvents = fsm.Events{
 		}),
 	fsm.Event(ClientEventPaymentChannelAddingFunds).
 		FromMany(DealStatusAccepted).To(DealStatusPaymentChannelAllocatingLane).
-		FromMany(DealStatusCheckFunds).To(DealStatusPaymentChannelAddingFunds).
+		FromMany(DealStatusCheckFunds, DealStatusInsufficientFunds).To(DealStatusPaymentChannelAddingFunds).
 		Action(func(deal *ClientDealState, msgCID cid.Cid, payCh address.Address) error {
 			deal.WaitMsgCID = &msgCID
 			if deal.PaymentInfo == nil {
@@ -343,6 +358,7 @@ var FsmClientEvents = fsm.Events{
 		FromMany(DealStatusCheckFunds).To(DealStatusInsufficientFunds).
 		Action(func(deal *ClientDealState, shortfall abi.TokenAmount) error {
 			deal.Message = fmt.Sprintf("not enough current or pending funds in payment channel, shortfall of %s", shortfall.String())
+			deal.VoucherShortfall = shortfall
 			return nil
 		}),
 	fsm.Event(ClientEventBadPaymentRequested).
@@ -453,6 +469,7 @@ var ClientStateEntryFuncs = fsm.StateEntryFuncs{
 	DealStatusSendFundsLastPayment:         SendFunds,
 	DealStatusCheckFunds:                   CheckFunds,
 	DealStatusPaymentChannelAddingFunds:    WaitPaymentChannelReady,
+	DealStatusInsufficientFunds:            ReAddFunds,
 	DealStatusFailing:                      ClientCancelDeal,
 	DealStatusCancelling:                   ClientCancelDeal,
 	DealStatusCheckComplete:                CheckComplete,
