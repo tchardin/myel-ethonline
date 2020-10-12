@@ -43,6 +43,7 @@ func SetupPaymentChannelStart(ctx fsm.Context, environment ClientDealEnvironment
 
 	paych, msgCID, err := environment.Node().GetOrCreatePaymentChannel(ctx.Context(), deal.ClientWallet, deal.MinerWallet, deal.TotalFunds, tok)
 	if err != nil {
+		fmt.Printf("Unable to setup payment channel: %v", err)
 		return ctx.Trigger(ClientEventPaymentChannelErrored, err)
 	}
 
@@ -94,7 +95,7 @@ func ProcessPaymentRequested(ctx fsm.Context, environment ClientDealEnvironment,
 
 // SendFunds sends the next amount requested by the provider
 func SendFunds(ctx fsm.Context, environment ClientDealEnvironment, deal ClientDealState) error {
-	// check that paymentRequest <= (totalReceived - bytesPaidFor) * pricePerByte + (unsealPrice - unsealFundsPaid), or fail
+	// check that paymentRequest <= (totalReceived - bytesPaidFor) * pricePerByte, or fail
 	retrievalPrice := big.Mul(abi.NewTokenAmount(int64(deal.TotalReceived-deal.BytesPaidFor)), deal.PricePerByte)
 	if deal.PaymentRequested.GreaterThan(retrievalPrice) {
 		return ctx.Trigger(ClientEventBadPaymentRequested, "too much money requested for bytes sent")
@@ -104,6 +105,8 @@ func SendFunds(ctx fsm.Context, environment ClientDealEnvironment, deal ClientDe
 	if err != nil {
 		return ctx.Trigger(ClientEventCreateVoucherFailed, err)
 	}
+
+	fmt.Printf("Retrieval price: %v\n", retrievalPrice.String())
 
 	// create payment voucher with node (or fail) for (fundsSpent + paymentRequested)
 	// use correct payCh + lane
@@ -141,6 +144,7 @@ func CheckFunds(ctx fsm.Context, environment ClientDealEnvironment, deal ClientD
 	}
 	availableFunds, err := environment.Node().CheckAvailableFunds(ctx.Context(), deal.PaymentInfo.PayCh)
 	if err != nil {
+		fmt.Printf("Unable to check available funds: %v", err)
 		return ctx.Trigger(ClientEventPaymentChannelErrored, err)
 	}
 	unredeemedFunds := big.Sub(availableFunds.ConfirmedAmt, availableFunds.VoucherReedeemedAmt)
@@ -225,7 +229,7 @@ var FsmClientEvents = fsm.Events{
 
 	// Payment channel setup
 	fsm.Event(ClientEventPaymentChannelErrored).
-		FromMany(DealStatusAccepted, DealStatusPaymentChannelCreating, DealStatusPaymentChannelAddingFunds).To(DealStatusFailing).
+		FromMany(DealStatusAccepted, DealStatusPaymentChannelCreating, DealStatusPaymentChannelAddingFunds, DealStatusCheckFunds).To(DealStatusFailing).
 		Action(func(deal *ClientDealState, err error) error {
 			deal.Message = fmt.Errorf("error from payment channel: %w", err).Error()
 			return nil
@@ -468,7 +472,6 @@ type ProviderDealEnvironment interface {
 
 // TrackTransfer resumes a deal so we can start sending data
 func TrackTransfer(ctx fsm.Context, environment ProviderDealEnvironment, deal ProviderDealState) error {
-	fmt.Println("TrackTransfer")
 	err := environment.TrackTransfer(deal)
 	if err != nil {
 		return ctx.Trigger(ProviderEventDataTransferError, err)
@@ -477,7 +480,6 @@ func TrackTransfer(ctx fsm.Context, environment ProviderDealEnvironment, deal Pr
 }
 
 func UnpauseDeal(ctx fsm.Context, environment ProviderDealEnvironment, deal ProviderDealState) error {
-	fmt.Println("UnpauseDeal")
 	err := environment.TrackTransfer(deal)
 	if err != nil {
 		return ctx.Trigger(ProviderEventDataTransferError, err)

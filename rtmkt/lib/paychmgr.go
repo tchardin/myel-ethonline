@@ -3,6 +3,7 @@ package rtmkt
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -12,28 +13,35 @@ import (
 
 	"github.com/filecoin-project/go-address"
 	cborrpc "github.com/filecoin-project/go-cbor-util"
+	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/big"
 	"github.com/filecoin-project/go-state-types/network"
 	"github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/build"
 	"github.com/filecoin-project/lotus/chain/actors"
+	"github.com/filecoin-project/lotus/chain/actors/adt"
 	"github.com/filecoin-project/lotus/chain/actors/builtin/paych"
 	"github.com/filecoin-project/lotus/chain/types"
 	"github.com/filecoin-project/lotus/chain/wallet"
 	"github.com/filecoin-project/lotus/lib/sigs"
 	"github.com/filecoin-project/lotus/node/modules/dtypes"
+	paych0 "github.com/filecoin-project/specs-actors/actors/builtin/paych"
+	adt0 "github.com/filecoin-project/specs-actors/actors/util/adt"
 	init2 "github.com/filecoin-project/specs-actors/v2/actors/builtin/init"
+	blocks "github.com/ipfs/go-block-format"
 	"github.com/ipfs/go-cid"
 	"github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-datastore/namespace"
 	dsq "github.com/ipfs/go-datastore/query"
+	cbor "github.com/ipfs/go-ipld-cbor"
 )
 
 type paychManager struct {
-	ctx    context.Context
-	api    api.FullNode
-	wallet *wallet.Wallet
-	store  *channelStore
+	ctx      context.Context
+	api      api.FullNode
+	wallet   *wallet.Wallet
+	store    *channelStore
+	actStore *cbor.BasicIpldStore
 
 	lk       sync.RWMutex
 	channels map[string]*channelAccessor
@@ -117,26 +125,29 @@ func (pm *paychManager) accessorCacheKey(from address.Address, to address.Addres
 func (pm *paychManager) addAccessorToCache(from address.Address, to address.Address) *channelAccessor {
 	key := pm.accessorCacheKey(from, to)
 	ca := &channelAccessor{
-		from:  from,
-		to:    to,
-		chctx: pm.ctx,
-		api:   pm.api,
-		wal:   pm.wallet,
-		store: pm.store,
-		lk:    &channelLock{globalLock: &pm.lk},
+		from:         from,
+		to:           to,
+		chctx:        pm.ctx,
+		api:          pm.api,
+		wal:          pm.wallet,
+		actStore:     pm.actStore,
+		store:        pm.store,
+		lk:           &channelLock{globalLock: &pm.lk},
+		msgListeners: newMsgListeners(),
 	}
 	// TODO: Use LRU
 	pm.channels[key] = ca
 	return ca
 }
 
-func NewPaychManager(ctx context.Context, node api.FullNode, w *wallet.Wallet, ds dtypes.MetadataDS) *paychManager {
+func NewPaychManager(ctx context.Context, node api.FullNode, w *wallet.Wallet, ds dtypes.MetadataDS, adts *cbor.BasicIpldStore) *paychManager {
 	store := NewChannelStore(ds)
 	return &paychManager{
 		ctx:      ctx,
 		api:      node,
 		wallet:   w,
 		store:    store,
+		actStore: adts,
 		channels: make(map[string]*channelAccessor),
 	}
 	// return &Manager{
@@ -298,13 +309,18 @@ func (pm *paychManager) trackInboundChannel(ctx context.Context, ch address.Addr
 }
 
 func (pm *paychManager) loadStateChannelInfo(ch address.Address, dir uint64) (*ChannelInfo, error) {
-	actorState, err := pm.api.StateReadState(pm.ctx, ch, types.EmptyTSK)
-	if err != nil {
-		return nil, fmt.Errorf("Unable to read actor state: %v", err)
+	ca := &channelAccessor{
+		chctx:        pm.ctx,
+		api:          pm.api,
+		wal:          pm.wallet,
+		actStore:     pm.actStore,
+		store:        pm.store,
+		lk:           &channelLock{globalLock: &pm.lk},
+		msgListeners: newMsgListeners(),
 	}
-	as, ok := actorState.State.(paych.State)
-	if !ok {
-		return nil, fmt.Errorf("Unable to cast actor state to paych state")
+	_, as, err := ca.loadPaychActorState(ch)
+	if err != nil {
+		return nil, err
 	}
 	f, err := as.From()
 	if err != nil {
@@ -370,6 +386,7 @@ type channelAccessor struct {
 	chctx         context.Context
 	api           api.FullNode
 	wal           *wallet.Wallet
+	actStore      *cbor.BasicIpldStore
 	store         *channelStore
 	lk            *channelLock
 	fundsReqQueue []*fundsReq
@@ -613,13 +630,9 @@ func (ca *channelAccessor) currentAvailableFunds(channelID string, queuedAmt typ
 	totalRedeemed := types.NewInt(0)
 	if channelInfo.Channel != nil {
 		ch := *channelInfo.Channel
-		actorState, err := ca.api.StateReadState(ca.chctx, ch, types.EmptyTSK)
+		_, as, err := ca.loadPaychActorState(ch)
 		if err != nil {
 			return nil, err
-		}
-		as, ok := actorState.State.(paych.State)
-		if !ok {
-			return nil, fmt.Errorf("Unable to cast actorState to paych.State")
 		}
 
 		laneStates, err := ca.laneState(as, ch)
@@ -648,20 +661,114 @@ func (ca *channelAccessor) currentAvailableFunds(channelID string, queuedAmt typ
 	}, nil
 }
 
+type state0 struct {
+	paych0.State
+	store adt.Store
+	lsAmt *adt0.Array
+}
+
+// Channel owner, who has funded the actor
+func (s *state0) From() (address.Address, error) {
+	return s.State.From, nil
+}
+
+// Recipient of payouts from channel
+func (s *state0) To() (address.Address, error) {
+	return s.State.To, nil
+}
+
+// Height at which the channel can be `Collected`
+func (s *state0) SettlingAt() (abi.ChainEpoch, error) {
+	return s.State.SettlingAt, nil
+}
+
+// Amount successfully redeemed through the payment channel, paid out on `Collect()`
+func (s *state0) ToSend() (abi.TokenAmount, error) {
+	return s.State.ToSend, nil
+}
+
+func (s *state0) getOrLoadLsAmt() (*adt0.Array, error) {
+	if s.lsAmt != nil {
+		return s.lsAmt, nil
+	}
+
+	// Get the lane state from the chain
+	lsamt, err := adt0.AsArray(s.store, s.State.LaneStates)
+	if err != nil {
+		return nil, err
+	}
+
+	s.lsAmt = lsamt
+	return lsamt, nil
+}
+
+// Get total number of lanes
+func (s *state0) LaneCount() (uint64, error) {
+	lsamt, err := s.getOrLoadLsAmt()
+	if err != nil {
+		return 0, err
+	}
+	return lsamt.Length(), nil
+}
+
+// Iterate lane states
+func (s *state0) ForEachLaneState(cb func(idx uint64, dl paych.LaneState) error) error {
+	// Get the lane state from the chain
+	lsamt, err := s.getOrLoadLsAmt()
+	if err != nil {
+		return err
+	}
+
+	// Note: we use a map instead of an array to store laneStates because the
+	// client sets the lane ID (the index) and potentially they could use a
+	// very large index.
+	var ls paych0.LaneState
+	return lsamt.ForEach(&ls, func(i int64) error {
+		return cb(uint64(i), &laneState0{ls})
+	})
+}
+
+type laneState0 struct {
+	paych0.LaneState
+}
+
+func (ls *laneState0) Redeemed() (big.Int, error) {
+	return ls.LaneState.Redeemed, nil
+}
+
+func (ls *laneState0) Nonce() (uint64, error) {
+	return ls.LaneState.Nonce, nil
+}
+
 func (ca *channelAccessor) loadPaychActorState(ch address.Address) (*types.Actor, paych.State, error) {
 	actor, err := ca.api.StateGetActor(ca.chctx, ch, types.EmptyTSK)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Unable to get actor: %v", err)
 	}
 	actorState, err := ca.api.StateReadState(ca.chctx, ch, types.EmptyTSK)
+	stateEncod, err := json.Marshal(actorState.State)
+
+	adtStore := adt0.WrapStore(ca.chctx, ca.actStore)
+	state := state0{store: adtStore}
+	err = json.Unmarshal(stateEncod, &state)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("Error parsing actor state: %v", err)
 	}
-	as, ok := actorState.State.(paych.State)
-	if !ok {
-		return nil, nil, fmt.Errorf("Unable to load paych actor state: could not cast interface")
+
+	raw, err := ca.api.ChainReadObj(ca.chctx, state.LaneStates)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Unable to read lane states from chain: %v", err)
 	}
-	return actor, as, nil
+	block, err := blocks.NewBlockWithCid(raw, state.LaneStates)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Unable to make a block with obj: %v", err)
+	}
+	err = ca.actStore.Blocks.Put(block)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Unable to set block in store: %v", err)
+	}
+
+	return actor, &state, nil
 }
 
 type laneState struct {
@@ -850,6 +957,10 @@ func (ca *channelAccessor) createPaych(ctx context.Context, amt types.BigInt) (c
 		return cid.Undef, err
 	}
 
+	// TODO: Hard coding GasLimit here as next method errors out trying to figure it out:
+	// message execution failed: exit 17, reason: constructor failed (RetCode=17)
+	msg.GasLimit = int64(8264670)
+
 	msg, err = ca.api.GasEstimateMessageGas(ctx, msg, nil, types.EmptyTSK)
 	if err != nil {
 		return cid.Undef, err
@@ -916,6 +1027,7 @@ func (ca *channelAccessor) waitPaychCreateMsg(channelID string, mcid cid.Cid) er
 			fmt.Printf("failed to remove channel %s: %s", channelID, dserr)
 		}
 
+		// Exit code 7 means out of gas
 		err := fmt.Errorf("payment channel creation failed (exit code %d)", mwait.Receipt.ExitCode)
 		fmt.Printf("Error: %v", err)
 		return err
@@ -1068,7 +1180,7 @@ func (ca *channelAccessor) createVoucher(ctx context.Context, ch address.Address
 		return nil, fmt.Errorf("failed to get voucher signing bytes: %v", err)
 	}
 
-	sig, err := ca.api.WalletSign(ctx, ci.Control, vb)
+	sig, err := ca.wal.Sign(ctx, ci.Control, vb)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign voucher: %v", err)
 	}
@@ -1076,6 +1188,7 @@ func (ca *channelAccessor) createVoucher(ctx context.Context, ch address.Address
 
 	// Store the voucher
 	if _, err := ca.addVoucherUnlocked(ctx, ch, sv, types.NewInt(0)); err != nil {
+		fmt.Printf("Error storing voucher: %v", err)
 		// If there are not enough funds in the channel to cover the voucher,
 		// return a voucher create result with the shortfall
 		if ife, ok := err.(insufficientFundsErr); ok {

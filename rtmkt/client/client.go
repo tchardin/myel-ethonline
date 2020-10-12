@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/big"
 	"github.com/ipfs/go-cid"
@@ -57,19 +56,24 @@ func main() {
 		Msg("Received from provider")
 
 	clientStoreID := n.Client.NewStoreID()
-	clientPaymentChannel, _ := address.NewIDAddress(uint64(10))
+	clientPaymentChannel, err := n.Wallet.GetDefault()
+	if err != nil {
+		log.Error().Err(err).Msg("Unable to get default address")
+	}
 	paymentInterval := uint64(10000)
 	paymentIntervalIncrease := uint64(1000)
 	pricePerByte := abi.NewTokenAmount(3)
 	params, _ := rtmkt.NewParams(pricePerByte, paymentInterval, paymentIntervalIncrease)
 	total := big.Mul(pricePerByte, abi.NewTokenAmount(int64(res.Size)))
 
+	log.Info().Str("Address", res.PaymentAddress.String()).Msg("Provider")
+
 	did, err := n.Client.Retrieve(n.Ctx, mcid, params, total, rp, clientPaymentChannel, res.PaymentAddress, clientStoreID)
 	if err != nil {
 		log.Error().Err(err).Msg("Unable to retrieve content")
 	}
 
-	log.Info().Uint64("DealID", uint64(did)).Msg("Started retrieval deal")
+	log.Info().Uint64("DealID", uint64(did)).Str("Total", total.String()).Msg("Started retrieval deal")
 
 	<-dealFinished
 	// We make an offline api to make sure ipfs doesn't load it directly

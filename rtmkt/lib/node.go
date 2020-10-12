@@ -122,6 +122,7 @@ func (rn *retrievalNode) CreatePaymentVoucher(ctx context.Context, paymentChanne
 	// querying the chain
 	voucher, err := rn.pm.PaychVoucherCreate(ctx, paymentChannel, amount, lane)
 	if err != nil {
+		fmt.Printf("CreatePaymentVoucher: %v", err)
 		return nil, err
 	}
 	if voucher.Voucher == nil {

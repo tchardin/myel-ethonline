@@ -28,6 +28,7 @@ require (
 	github.com/ipfs/go-ipfs-config v0.9.0
 	github.com/ipfs/go-ipfs-ds-help v1.0.0
 	github.com/ipfs/go-ipfs-files v0.0.8
+	github.com/ipfs/go-ipld-cbor v0.0.5-0.20200428170625-a0bd04d3cbdf
 	github.com/ipfs/interface-go-ipfs-core v0.4.0
 	github.com/ipld/go-ipld-prime v0.5.1-0.20200828233916-988837377a7f
 	github.com/jpillora/backoff v1.0.0

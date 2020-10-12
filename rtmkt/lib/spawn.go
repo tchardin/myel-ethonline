@@ -20,6 +20,7 @@ import (
 	"github.com/filecoin-project/lotus/chain/wallet"
 	"github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-datastore/namespace"
+	cbor "github.com/ipfs/go-ipld-cbor"
 )
 
 // NodeType is the role our node can play in the retrieval market
@@ -52,7 +53,10 @@ func (mn *MyelNode) Close() {
 func SpawnNode(nt NodeType) (*MyelNode, error) {
 	ctx := context.Background()
 	// Establish connection with a remote (or local) lotus node
-	lapi, lcloser, err := lclient.NewFullNodeRPC(ctx, "ws://localhost:1234/rpc/v0", http.Header{})
+	lapi, lcloser, err := lclient.NewFullNodeRPC(ctx, "ws://localhost:1234/rpc/v0", http.Header{
+		// This token can write msgs to mempool but not sign them
+		"Authorization": []string{fmt.Sprintf("Bearer %s", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJBbGxvdyI6WyJyZWFkIiwid3JpdGUiXX0.KCwsa8iHeUbPaCzJFN2eL7Or-vqernEhQHuB9CcaQOg")},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("Unable to start lotus rpc: %v", err)
 	}
@@ -83,7 +87,8 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Unable to create new wallet: %v", err)
 	}
-	paychMgr := NewPaychManager(ctx, lapi, w, ds)
+	actStore := cbor.NewCborStore(ipfs.node.Blockstore)
+	paychMgr := NewPaychManager(ctx, lapi, w, ds, actStore)
 
 	// Wrap the full node api to provide an adapted interface
 	radapter := NewRetrievalNode(lapi, paychMgr, TestModeOff)

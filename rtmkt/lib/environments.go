@@ -132,13 +132,11 @@ func (cde *clientDealEnvironment) Node() RetrievalNode {
 func (cde *clientDealEnvironment) OpenDataTransfer(ctx context.Context, to peer.ID, proposal *DealProposal) (datatransfer.ChannelID, error) {
 	sel := shared.AllSelector()
 	var vouch datatransfer.Voucher = proposal
-	fmt.Println("Opening data transfer")
 	return cde.c.dataTransfer.OpenPullDataChannel(ctx, to, vouch, proposal.PayloadCID, sel)
 }
 
 func (cde *clientDealEnvironment) SendDataTransferVoucher(ctx context.Context, channelID datatransfer.ChannelID, payment *DealPayment) error {
 	var vouch datatransfer.Voucher = payment
-	fmt.Println("SendDataTransferVoucher")
 	return cde.c.dataTransfer.SendVoucher(ctx, channelID, vouch)
 }
 
