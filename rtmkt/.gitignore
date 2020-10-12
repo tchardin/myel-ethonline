@@ -1,3 +1,8 @@
+.DS_Store
+
+client.private
+provider.private
+
 # Binaries for programs and plugins
 *.exe
 *.exe~

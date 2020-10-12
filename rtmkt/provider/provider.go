@@ -25,7 +25,12 @@ func main() {
 		log.Error().Err(err).Msg("Unable to load web content")
 	}
 
-	log.Info().Str("cid", hcid).Msg("Serving content")
+	size, err := n.Store.GetSize(hcid)
+	if err != nil {
+		log.Error().Err(err).Msg("Unable to get file size")
+	}
+
+	log.Info().Str("cid", hcid.String()).Int64("Size", size).Msg("Serving content")
 
 	n.Provider.SubscribeToEvents(func(event rtmkt.ProviderEvent, state rtmkt.ProviderDealState) {
 		log.Info().
@@ -33,6 +38,13 @@ func main() {
 			Interface("ProviderDealStatus", rtmkt.DealStatuses[state.Status]).
 			Msg("Updating")
 	})
+
+	addr, err := n.Wallet.GetDefault()
+	if err != nil {
+		log.Error().Err(err).Msg("Unable to get default address")
+	}
+
+	log.Info().Str("Address", addr.String()).Msg("Wallet using")
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)

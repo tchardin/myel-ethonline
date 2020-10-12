@@ -171,17 +171,17 @@ func (s *ipfsStore) GetFile(cidStr string) error {
 	return nil
 }
 
-func (s *ipfsStore) AddWebFile(urlStr string) (string, error) {
+func (s *ipfsStore) AddWebFile(urlStr string) (cid.Cid, error) {
 	u, err := url.Parse(urlStr)
 	if err != nil {
-		return "", fmt.Errorf("Unable to parse url: %v", err)
+		return cid.Undef, fmt.Errorf("Unable to parse url: %v", err)
 	}
 	wf := files.NewWebFile(u)
 	cidFile, err := s.api.Unixfs().Add(s.ctx, wf)
 	if err != nil {
-		return "", fmt.Errorf("Unable to add file to ipfs: %v", err)
+		return cid.Undef, fmt.Errorf("Unable to add file to ipfs: %v", err)
 	}
-	return cidFile.String(), nil
+	return cidFile.Cid(), nil
 }
 
 func (s *ipfsStore) GetFirstPeer() icore.ConnectionInfo {
@@ -231,13 +231,17 @@ func (s *ipfsStore) Get(cid cid.Cid) (blocks.Block, error) {
 	return blocks.NewBlockWithCid(data, cid)
 }
 
-func (s *ipfsStore) GetSize(cid cid.Cid) (int, error) {
-	st, err := s.api.Block().Stat(s.ctx, icorepath.IpldPath(cid))
+func (s *ipfsStore) GetSize(cid cid.Cid) (int64, error) {
+	st, err := s.api.Unixfs().Get(s.ctx, icorepath.IpldPath(cid))
 	if err != nil {
 		return 0, fmt.Errorf("getting ipfs block: %w", err)
 	}
+	si, err := st.Size()
+	if err != nil {
+		return 0, fmt.Errorf("Unable to get size from Node: %v", err)
+	}
 
-	return st.Size(), nil
+	return si, nil
 }
 
 func (s *ipfsStore) Put(block blocks.Block) error {
