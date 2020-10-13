@@ -38,7 +38,7 @@ import (
 type paychManager struct {
 	ctx      context.Context
 	api      api.FullNode
-	wallet   *wallet.Wallet
+	wallet   *wallet.LocalWallet
 	store    *channelStore
 	actStore *cbor.BasicIpldStore
 
@@ -107,7 +107,7 @@ func (pm *paychManager) addAccessorToCache(from address.Address, to address.Addr
 	return ca
 }
 
-func NewPaychManager(ctx context.Context, node api.FullNode, w *wallet.Wallet, ds dtypes.MetadataDS, adts *cbor.BasicIpldStore) *paychManager {
+func NewPaychManager(ctx context.Context, node api.FullNode, w *wallet.LocalWallet, ds dtypes.MetadataDS, adts *cbor.BasicIpldStore) *paychManager {
 	store := NewChannelStore(ds)
 	return &paychManager{
 		ctx:      ctx,
@@ -375,7 +375,7 @@ func (pm *paychManager) trackInboundChannel(ctx context.Context, ch address.Addr
 	if err != nil {
 		return nil, err
 	}
-	has, err := pm.wallet.HasKey(toKey)
+	has, err := pm.wallet.WalletHas(ctx, toKey)
 	if err != nil {
 		return nil, err
 	}
@@ -465,7 +465,7 @@ type channelAccessor struct {
 	to            address.Address
 	chctx         context.Context
 	api           api.FullNode
-	wal           *wallet.Wallet
+	wal           *wallet.LocalWallet
 	actStore      *cbor.BasicIpldStore
 	store         *channelStore
 	lk            *channelLock
@@ -1136,7 +1136,7 @@ func (ca *channelAccessor) mpoolPush(ctx context.Context, msg *types.Message) (*
 		return nil, err
 	}
 
-	sig, err := ca.wal.Sign(ctx, msg.From, mbl.Cid().Bytes())
+	sig, err := ca.wal.WalletSign(ctx, msg.From, mbl.Cid().Bytes(), api.MsgMeta{})
 	if err != nil {
 		return nil, err
 	}
@@ -1275,7 +1275,7 @@ func (ca *channelAccessor) createVoucher(ctx context.Context, ch address.Address
 		return nil, fmt.Errorf("failed to get voucher signing bytes: %v", err)
 	}
 
-	sig, err := ca.wal.Sign(ctx, ci.Control, vb)
+	sig, err := ca.wal.WalletSign(ctx, ci.Control, vb, api.MsgMeta{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign voucher: %v", err)
 	}

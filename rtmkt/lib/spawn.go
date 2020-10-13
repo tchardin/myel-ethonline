@@ -41,7 +41,7 @@ type MyelNode struct {
 	Store    *ipfsStore
 	Client   RetrievalClient
 	Provider RetrievalProvider
-	Wallet   *wallet.Wallet
+	Wallet   *wallet.LocalWallet
 	PaychMgr *paychManager
 	lcloser  jsonrpc.ClientCloser
 }
@@ -161,7 +161,7 @@ func (mn *MyelNode) WalletImport(name string) (address.Address, error) {
 	if err := json.Unmarshal(data, &ki); err != nil {
 		return address.Undef, fmt.Errorf("Unable to unmarshal keyinfo: %v", err)
 	}
-	addr, err := mn.Wallet.Import(&ki)
+	addr, err := mn.Wallet.WalletImport(mn.Ctx, &ki)
 	if err := mn.Wallet.SetDefault(addr); err != nil {
 		return address.Undef, err
 	}
