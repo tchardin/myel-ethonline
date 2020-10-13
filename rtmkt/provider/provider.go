@@ -41,20 +41,8 @@ func main() {
 			Msg("Updating")
 
 		if event == rtmkt.ProviderEventComplete {
-			chs, err := n.PaychMgr.ListChannels()
-			if err != nil {
-				log.Error().Err(err).Msg("Unable to list channels")
-				return
-			}
-			for _, ch := range chs {
-				vchs, err := n.PaychMgr.ListVouchers(n.Ctx, ch)
-				if err != nil {
-					log.Error().Err(err).Msg("Listing vouchers")
-					continue
-				}
-				for _, vch := range vchs {
-					log.Info().Interface("Voucher", vch.Voucher).Msg("Saved")
-				}
+			if err := n.PaychMgr.RedeemAll(n.Ctx); err != nil {
+				log.Error().Err(err).Msg("Redeeming all vouchers")
 			}
 		}
 	})

@@ -224,8 +224,26 @@ func (pm *paychManager) RedeemAll(ctx context.Context) error {
 			fmt.Printf("Error checking spendable vouchers: %v", err)
 			continue
 		}
+
 		var wg sync.WaitGroup
-		wg.Add(len(bestByLane))
+		wg.Add(len(bestByLane) + 1)
+		// Add an extra Settle call in case the channel hasn't been settled yet
+		// it's ok if it fails because it may already be settled
+		mcid, err := pm.Settle(ctx, ch)
+		if err != nil {
+			fmt.Printf("Unable to call Settle on pch: %v", err)
+		}
+		go func(msgCid cid.Cid) {
+			defer wg.Done()
+			msgLookup, err := pm.api.StateWaitMsg(ctx, msgCid, build.MessageConfidence)
+			if err != nil {
+				fmt.Printf("Error waiting for pch to settle: %v", err)
+			}
+			if msgLookup.Receipt.ExitCode != 0 {
+				fmt.Printf("Failed to collect pch - ExitCode: %v", msgLookup.Receipt.ExitCode)
+			}
+		}(mcid)
+
 		for _, voucher := range bestByLane {
 			msgCid, err := pm.SubmitVoucher(ctx, ch, voucher, nil, nil)
 			if err != nil {
@@ -239,7 +257,7 @@ func (pm *paychManager) RedeemAll(ctx context.Context) error {
 					fmt.Printf("Error waiting for voucher submit: %v", err)
 				}
 				if msgLookup.Receipt.ExitCode != 0 {
-					fmt.Printf("Failed to submit voucher: %v", err)
+					fmt.Printf("Failed to submit voucher - ExitCode: %v", msgLookup.Receipt.ExitCode)
 				}
 			}(voucher, msgCid)
 		}
@@ -273,6 +291,22 @@ func (pm *paychManager) SubmitVoucher(ctx context.Context, ch address.Address, s
 		return cid.Undef, err
 	}
 	return ca.submitVoucher(ctx, ch, sv, secret)
+}
+
+func (pm *paychManager) Settle(ctx context.Context, addr address.Address) (cid.Cid, error) {
+	ca, err := pm.accessorByAddress(addr)
+	if err != nil {
+		return cid.Undef, err
+	}
+	return ca.settle(ctx, addr)
+}
+
+func (pm *paychManager) Collect(ctx context.Context, addr address.Address) (cid.Cid, error) {
+	ca, err := pm.accessorByAddress(addr)
+	if err != nil {
+		return cid.Undef, err
+	}
+	return ca.collect(ctx, addr)
 }
 
 var errProofNotSupported = fmt.Errorf("payment channel proof parameter is not supported")
@@ -1638,6 +1672,64 @@ func (ca *channelAccessor) submitVoucher(ctx context.Context, ch address.Address
 
 	// Mark the voucher and any lower-nonce vouchers as having been submitted
 	err = ca.store.MarkVoucherSubmitted(ci, sv)
+	if err != nil {
+		return cid.Undef, err
+	}
+
+	return smsg.Cid(), nil
+}
+
+func (ca *channelAccessor) settle(ctx context.Context, ch address.Address) (cid.Cid, error) {
+	ca.lk.Lock()
+	defer ca.lk.Unlock()
+
+	ci, err := ca.store.ByAddress(ch)
+	if err != nil {
+		return cid.Undef, err
+	}
+
+	mb, err := ca.messageBuilder(ctx, ci.Control)
+	if err != nil {
+		return cid.Undef, err
+	}
+	msg, err := mb.Settle(ch)
+	if err != nil {
+		return cid.Undef, err
+	}
+	smgs, err := ca.mpoolPush(ctx, msg)
+	if err != nil {
+		return cid.Undef, err
+	}
+
+	ci.Settling = true
+	err = ca.store.putChannelInfo(ci)
+	if err != nil {
+		fmt.Printf("Error marking channel as settled: %s", err)
+	}
+
+	return smgs.Cid(), err
+}
+
+func (ca *channelAccessor) collect(ctx context.Context, ch address.Address) (cid.Cid, error) {
+	ca.lk.Lock()
+	defer ca.lk.Unlock()
+
+	ci, err := ca.store.ByAddress(ch)
+	if err != nil {
+		return cid.Undef, err
+	}
+
+	mb, err := ca.messageBuilder(ctx, ci.Control)
+	if err != nil {
+		return cid.Undef, err
+	}
+
+	msg, err := mb.Collect(ch)
+	if err != nil {
+		return cid.Undef, err
+	}
+
+	smsg, err := ca.mpoolPush(ctx, msg)
 	if err != nil {
 		return cid.Undef, err
 	}
