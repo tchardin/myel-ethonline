@@ -28,6 +28,10 @@ func main() {
 		log.Info().
 			Str("ClientEvent", rtmkt.ClientEvents[event]).
 			Str("ClientDealStatus", rtmkt.DealStatuses[state.Status]).
+			Uint64("TotalReceived", state.TotalReceived).
+			Str("TotalFunds", state.TotalFunds.String()).
+			Str("FundsSpent", state.FundsSpent.String()).
+			Str("VoucherShortfall", state.VoucherShortfall.String()).
 			Msg("Updating")
 
 		if event == rtmkt.ClientEventCompleteVerified {
@@ -64,7 +68,9 @@ func main() {
 	paymentIntervalIncrease := uint64(1000)
 	pricePerByte := abi.NewTokenAmount(3)
 	params, _ := rtmkt.NewParams(pricePerByte, paymentInterval, paymentIntervalIncrease)
-	total := big.Mul(pricePerByte, abi.NewTokenAmount(int64(res.Size)))
+	// Seems like the files are sometimes a tiny bit larget than advertized by the deal
+	// so we add little leeway
+	total := big.Add(big.Mul(pricePerByte, abi.NewTokenAmount(int64(res.Size))), abi.NewTokenAmount(int64(500)))
 
 	log.Info().Str("Address", res.PaymentAddress.String()).Msg("Provider")
 

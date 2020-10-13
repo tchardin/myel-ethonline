@@ -36,7 +36,15 @@ func main() {
 		log.Info().
 			Str("ProviderEvent", rtmkt.ProviderEvents[event]).
 			Interface("ProviderDealStatus", rtmkt.DealStatuses[state.Status]).
+			Uint64("TotalSent", state.TotalSent).
+			Str("FundsReceived", state.FundsReceived.String()).
 			Msg("Updating")
+
+		if event == rtmkt.ProviderEventComplete {
+			if err := n.PaychMgr.RedeemAll(n.Ctx); err != nil {
+				log.Error().Err(err).Msg("Redeeming all vouchers")
+			}
+		}
 	})
 
 	addr, err := n.Wallet.GetDefault()
