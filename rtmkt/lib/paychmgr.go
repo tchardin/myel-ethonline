@@ -1117,8 +1117,8 @@ func (ca *channelAccessor) waitPaychCreateMsg(channelID string, mcid cid.Cid) er
 
 // mpoolPush preps and sends a message to mpool
 func (ca *channelAccessor) mpoolPush(ctx context.Context, msg *types.Message) (*types.SignedMessage, error) {
-	// TODO: See if we can make gas estimate method work properly sometime
-	msg.GasLimit = int64(8264670)
+	// TODO: If one part doesn't have an address this won't work
+	// msg.GasLimit = int64(1111111)
 
 	msg, err := ca.api.GasEstimateMessageGas(ctx, msg, nil, types.EmptyTSK)
 	if err != nil {
