@@ -28,6 +28,7 @@ type ClientDealEnvironment interface {
 func ProposeDeal(ctx fsm.Context, environment ClientDealEnvironment, deal ClientDealState) error {
 	channelID, err := environment.OpenDataTransfer(ctx.Context(), deal.Sender, &deal.DealProposal)
 	if err != nil {
+		fmt.Printf("Unable to open data transfer: %v\n", err)
 		return ctx.Trigger(ClientEventWriteDealProposalErrored, err)
 	}
 	return ctx.Trigger(ClientEventDealProposed, channelID)

@@ -41,8 +41,12 @@ func main() {
 			Msg("Updating")
 
 		if event == rtmkt.ProviderEventComplete {
-			if err := n.PaychMgr.RedeemAll(n.Ctx); err != nil {
+			redeemedVchrs, err := n.PaychMgr.RedeemAll(n.Ctx)
+			if err != nil {
 				log.Error().Err(err).Msg("Redeeming all vouchers")
+			}
+			for _, vch := range redeemedVchrs {
+				log.Info().Interface("Voucher", vch).Msg("Redeemed")
 			}
 		}
 	})

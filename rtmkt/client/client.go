@@ -64,6 +64,9 @@ func main() {
 	if err != nil {
 		log.Error().Err(err).Msg("Unable to get default address")
 	}
+
+	log.Info().Str("Address", clientPaymentChannel.String()).Msg("Wallet using")
+
 	paymentInterval := uint64(10000)
 	paymentIntervalIncrease := uint64(1000)
 	pricePerByte := abi.NewTokenAmount(3)

@@ -56,7 +56,7 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 	// Establish connection with a remote (or local) lotus node
 	lapi, lcloser, err := lclient.NewFullNodeRPC(ctx, "ws://40.65.198.241:8080/rpc/v0", http.Header{
 		// This token can write msgs to mempool but not sign them
-		"Authorization": []string{fmt.Sprintf("Bearer %s", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJBbGxvdyI6WyJyZWFkIl19.NdUubRWE8T-NyCws7fKE6wuU2TyqHeST7oxX7WWK-_4")},
+		"Authorization": []string{fmt.Sprintf("Bearer %s", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJBbGxvdyI6WyJyZWFkIiwid3JpdGUiXX0.zaQXQevDkk_1oEvGrgFhqJsJfjIA_e4ksuDuec2kplU")},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("Unable to start lotus rpc: %v", err)
