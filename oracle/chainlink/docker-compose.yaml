@@ -9,7 +9,7 @@ services:
      - POSTGRES_PASSWORD=squidtimeisdelicious
      - POSTGRES_DB=chainlink
   chainlink-dev:
-    image: smartcontract/chainlink
+    image: smartcontract/chainlink:0.8.18
     build:
       context: .
     command: ["local", "n", "-p", "/chainlink/chainlink.pwd", "-a", "/chainlink/api.pwd"]
