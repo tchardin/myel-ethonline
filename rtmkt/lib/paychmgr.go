@@ -213,11 +213,14 @@ func (pm *paychManager) ListVouchers(ctx context.Context, ch address.Address) ([
 	return ca.listVouchers(ctx, ch)
 }
 
-func (pm *paychManager) RedeemAll(ctx context.Context) error {
+// RedeemAll settles any tracked channels and submits relevant vouchers then returns the successfully
+// submitted vouchers
+func (pm *paychManager) RedeemAll(ctx context.Context) ([]*paych.SignedVoucher, error) {
 	chs, err := pm.ListChannels()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var redeemedVch []*paych.SignedVoucher
 	for _, ch := range chs {
 		bestByLane, err := pm.BestSpendableByLane(ctx, ch)
 		if err != nil {
@@ -259,11 +262,12 @@ func (pm *paychManager) RedeemAll(ctx context.Context) error {
 				if msgLookup.Receipt.ExitCode != 0 {
 					fmt.Printf("Failed to submit voucher - ExitCode: %v", msgLookup.Receipt.ExitCode)
 				}
+				redeemedVch = append(redeemedVch, voucher)
 			}(voucher, msgCid)
 		}
 		wg.Wait()
 	}
-	return nil
+	return redeemedVch, nil
 }
 
 func (pm *paychManager) BestSpendableByLane(ctx context.Context, ch address.Address) (map[uint64]*paych.SignedVoucher, error) {
@@ -1117,8 +1121,8 @@ func (ca *channelAccessor) waitPaychCreateMsg(channelID string, mcid cid.Cid) er
 
 // mpoolPush preps and sends a message to mpool
 func (ca *channelAccessor) mpoolPush(ctx context.Context, msg *types.Message) (*types.SignedMessage, error) {
-	// TODO: See if we can make gas estimate method work properly sometime
-	msg.GasLimit = int64(8264670)
+	// TODO: If one part doesn't have an address this won't work
+	// msg.GasLimit = int64(1111111)
 
 	msg, err := ca.api.GasEstimateMessageGas(ctx, msg, nil, types.EmptyTSK)
 	if err != nil {
