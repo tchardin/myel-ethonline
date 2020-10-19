@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/url"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -155,16 +156,14 @@ func NewIpfsStore(ctx context.Context) (*ipfsStore, error) {
 	return n, nil
 }
 
-func (s *ipfsStore) GetFile(cidStr string) error {
+func (s *ipfsStore) GetFile(cidStr, out string) error {
 	cid := icorepath.New(cidStr)
 	rootNode, err := s.api.Unixfs().Get(s.ctx, cid)
 	if err != nil {
 		return fmt.Errorf("Unable to get file from Unixfs: %v", err)
 	}
-	outputBasePath := "./"
-	outputPath := outputBasePath + cidStr
 
-	err = files.WriteTo(rootNode, outputPath)
+	err = files.WriteTo(rootNode, out)
 	if err != nil {
 		return fmt.Errorf("Unable to write file for cid: %v", err)
 	}
@@ -284,4 +283,20 @@ func (s *ipfsStore) Offline() error {
 	}
 	s.api = api
 	return nil
+}
+
+func (s *ipfsStore) AddFile(path string) (cid.Cid, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return cid.Undef, err
+	}
+	f, err := files.NewSerialFile(path, false, st)
+	if err != nil {
+		return cid.Undef, err
+	}
+	cidFile, err := s.api.Unixfs().Add(s.ctx, f)
+	if err != nil {
+		return cid.Undef, err
+	}
+	return cidFile.Cid(), nil
 }

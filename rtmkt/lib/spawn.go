@@ -15,6 +15,7 @@ import (
 	"github.com/filecoin-project/go-jsonrpc"
 	"github.com/filecoin-project/go-multistore"
 	"github.com/filecoin-project/go-storedcounter"
+	"github.com/filecoin-project/lotus/api"
 	lclient "github.com/filecoin-project/lotus/api/client"
 	"github.com/filecoin-project/lotus/chain/types"
 	"github.com/filecoin-project/lotus/chain/wallet"
@@ -43,6 +44,7 @@ type MyelNode struct {
 	Provider RetrievalProvider
 	Wallet   *wallet.LocalWallet
 	PaychMgr *paychManager
+	Lotus    api.FullNode
 	lcloser  jsonrpc.ClientCloser
 }
 
@@ -99,6 +101,7 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 		Store:    ipfs,
 		Wallet:   w,
 		PaychMgr: paychMgr,
+		Lotus:    lapi,
 		lcloser:  lcloser,
 	}
 	if nt == NodeTypeClient || nt == NodeTypeFull {
