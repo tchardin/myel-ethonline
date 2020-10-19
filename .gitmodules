@@ -6,4 +6,4 @@
 	url = https://github.com/filecoin-project/fil-blst.git
 [submodule "extern/go-ipfs"]
 	path = extern/go-ipfs
-	url = https://github.com/ipfs/go-ipfs.git
+	url = https://github.com/tchardin/go-ipfs.git
