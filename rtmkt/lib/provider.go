@@ -32,7 +32,7 @@ type RetrievalProvider interface {
 	Stop() error
 
 	// SetAsk sets the retrieval payment parameters that this miner will accept
-	SetAsk(ask *Ask)
+	SetAsk(ask *Ask) error
 
 	// GetAsk returns the retrieval providers pricing information
 	GetAsk() *Ask
@@ -170,12 +170,14 @@ func (p *Provider) GetAsk() *Ask {
 }
 
 // SetAsk sets the deal parameters this provider accepts
-func (p *Provider) SetAsk(ask *Ask) {
+func (p *Provider) SetAsk(ask *Ask) error {
 	err := p.askStore.SetAsk(ask)
 
 	if err != nil {
-		fmt.Printf("Error setting retrieval ask: %v", err)
+		fmt.Printf("Error setting retrieval ask: %v\n", err)
+		return err
 	}
+	return nil
 }
 
 // ListDeals lists all known retrieval deals
