@@ -52,11 +52,11 @@ contract ChannelVerify is ChainlinkClient, Ownable {
   {
     emit RequestVerifyChannelFulfilled(_requestId, _settleheight);
     if (_settleheight == 0) {
-      require(owner.call.value(1000000000000000000)(""), "Unable to transfer");
-      succeeded = 1;
+      succeeded = 0;
     }
     else {
-      succeeded = 0;
+      require(owner.call.value(1000000000000000000)(""), "Unable to transfer");
+      succeeded = 1;
     }
   }
 

@@ -1,4 +1,5 @@
 truffle/build/
+truffle/output
 chainlink/root/
 node_modules/
 .env
