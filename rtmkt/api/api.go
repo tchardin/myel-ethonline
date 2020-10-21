@@ -2,12 +2,6 @@ package main
 
 import (
 	"context"
-	"math/rand"
-	"net/http"
-	"os"
-	"os/signal"
-	"time"
-
 	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-jsonrpc"
 	"github.com/filecoin-project/go-state-types/abi"
@@ -17,6 +11,9 @@ import (
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"net/http"
+	"os"
+	"os/signal"
 
 	rtmkt "github.com/tchardin/myel-ethonline/rtmkt/lib"
 )
@@ -31,12 +28,16 @@ func main() {
 
 type ApiServer struct {
 	n *rtmkt.MyelNode
+	starting bool
+	clientSubscribed bool
+	providerSubscribed bool
 }
 
 func (host *ApiServer) StartNode(ctx context.Context, t rtmkt.NodeType) error {
-	if host.n != nil {
+	if host.starting || host.n != nil {
 		return nil
 	}
+	host.starting = true
 	var err error
 	host.n, err = rtmkt.SpawnNode(t)
 	if err != nil {
@@ -47,11 +48,17 @@ func (host *ApiServer) StartNode(ctx context.Context, t rtmkt.NodeType) error {
 }
 
 type ProviderEvent struct {
-	Name string
+	Status string
+	TotalReceived string
 }
 
-func (host *ApiServer) ProviderEvents(ctx context.Context) (<-chan ProviderEvent, error) {
+func (host *ApiServer) RegisterProviderEvents(ctx context.Context) (<-chan ProviderEvent, error) {
 	out := make(chan ProviderEvent)
+	if host.providerSubscribed {
+		return out, nil
+	} else {
+		host.providerSubscribed = true
+	}
 
 	host.n.Provider.SubscribeToEvents(func(event rtmkt.ProviderEvent, state rtmkt.ProviderDealState) {
 		log.Info().
@@ -62,10 +69,38 @@ func (host *ApiServer) ProviderEvents(ctx context.Context) (<-chan ProviderEvent
 			Msg("Updating")
 
 		out <- ProviderEvent{
-			Name: rtmkt.ProviderEvents[event],
+			Status: rtmkt.DealStatuses[state.Status],
+			TotalReceived: types.FIL(state.FundsReceived).String(),
 		}
 	})
 
+	return out, nil
+}
+
+func (host *ApiServer) RegisterClientEvents(ctx context.Context) (<-chan ClientEvent, error) {
+	out := make(chan ClientEvent)
+	if host.clientSubscribed {
+		return out, nil
+	} else {
+		host.clientSubscribed = true
+	}
+	log.Info().Msg("Registered client events")
+
+	host.n.Client.SubscribeToEvents(func(event rtmkt.ClientEvent, state rtmkt.ClientDealState) {
+		log.Info().
+			Str("ClientEvent", rtmkt.ClientEvents[event]).
+			Str("ClientDealStatus", rtmkt.DealStatuses[state.Status]).
+			Uint64("TotalReceived", state.TotalReceived).
+			Str("TotalFunds", state.TotalFunds.String()).
+			Str("FundsSpent", state.FundsSpent.String()).
+			Str("VoucherShortfall", state.VoucherShortfall.String()).
+			Msg("Updating")
+
+		out<-ClientEvent{
+			Status:        rtmkt.DealStatuses[state.Status],
+			TotalReceived: state.TotalReceived,
+		}
+	})
 	return out, nil
 }
 
@@ -76,11 +111,6 @@ func (host *ApiServer) SetProviderAsk(ctx context.Context, ppb int64, pi, pii ui
 		PaymentIntervalIncrease: pii,
 	}
 	return host.n.Provider.SetAsk(ask)
-}
-
-func (host *ApiServer) GetFirstPeer() (peer.ID, error) {
-	fp := host.n.Store.GetFirstPeer()
-	return fp.ID(), nil
 }
 
 func (host *ApiServer) DefaultAddress(ctx context.Context) (address.Address, error) {
@@ -110,7 +140,29 @@ type RetrievalOrder struct {
 	ProviderPeer            peer.ID
 }
 
-func (host *ApiServer) Retrieve(ctx context.Context, order RetrievalOrder) (<-chan string, error) {
+type ClientEvent struct {
+	Status string
+	TotalReceived uint64
+}
+
+func (host *ApiServer) Retrieve(ctx context.Context, order RetrievalOrder) (<-chan ClientEvent, error) {
+	out := make(chan ClientEvent)
+	host.n.Client.SubscribeToEvents(func(event rtmkt.ClientEvent, state rtmkt.ClientDealState) {
+		log.Info().
+			Str("ClientEvent", rtmkt.ClientEvents[event]).
+			Str("ClientDealStatus", rtmkt.DealStatuses[state.Status]).
+			Uint64("TotalReceived", state.TotalReceived).
+			Str("TotalFunds", state.TotalFunds.String()).
+			Str("FundsSpent", state.FundsSpent.String()).
+			Str("VoucherShortfall", state.VoucherShortfall.String()).
+			Msg("Updating")
+
+		out<-ClientEvent{
+			Status:        rtmkt.DealStatuses[state.Status],
+			TotalReceived: state.TotalReceived,
+		}
+	})
+
 	ppb := abi.NewTokenAmount(int64(order.PricePerByte))
 	params, _ := rtmkt.NewParams(ppb, order.PaymentInterval, order.PaymentIntervalIncrease)
 	total := big.Add(big.Mul(ppb, abi.NewTokenAmount(int64(order.Size))), abi.NewTokenAmount(int64(500)))
@@ -125,26 +177,16 @@ func (host *ApiServer) Retrieve(ctx context.Context, order RetrievalOrder) (<-ch
 		Str("ProviderPeer", order.ProviderPeer.String()).
 		Msg("Ready to retrieve")
 
-	out := make(chan string)
-	ticker := time.NewTicker(time.Second * 3)
-
-	go func() {
-		defer close(out)
-
-		for {
-			select {
-			case <-ticker.C:
-				rand.Seed(time.Now().UnixNano())
-				randInt := rand.Intn(14)
-				evt := rtmkt.ProviderEvents[rtmkt.ProviderEvent(randInt)]
-				out <- evt
-			case <-ctx.Done():
-				ticker.Stop()
-			}
-		}
-	}()
-
-	return out, nil
+	mcid, err := cid.Decode(order.ContentID)
+	if err != nil {
+		return out, err
+	}
+	clientStoreID := host.n.Client.NewStoreID()
+	rp := rtmkt.RetrievalPeer{
+		ID: order.ProviderPeer,
+	}
+	_, err = host.n.Client.Retrieve(ctx, mcid, params, total, rp, order.Client, order.Provider, clientStoreID)
+	return out, err
 }
 
 func (host *ApiServer) AddWebFile(ctx context.Context, url string) (cid.Cid, error) {
@@ -172,6 +214,37 @@ func (host *ApiServer) QueryDeal(ctx context.Context, m string, pid peer.ID) (rt
 		return rtmkt.QueryResponse{}, err
 	}
 	return host.n.Client.Query(ctx, rp, mcid, rtmkt.QueryParams{})
+}
+
+type ProviderResponse struct {
+	rtmkt.QueryResponse
+	PeerID peer.ID
+	IDAddress address.Address
+}
+
+// GetFirstPeer is a temp function to find a provider and requested deal terms for a piece of content
+func (host *ApiServer) GetFirstPeer(ctx context.Context, p string) (ProviderResponse, error) {
+	fp := host.n.Store.GetFirstPeer()
+	rp := rtmkt.RetrievalPeer{
+		ID: fp.ID(),
+	}
+	pcid, err := cid.Decode(p)
+	if err != nil {
+		return ProviderResponse{}, err
+	}
+	res, err := host.n.Client.Query(ctx, rp, pcid, rtmkt.QueryParams{})
+	if err != nil {
+		return ProviderResponse{}, err
+	}
+	idaddr, err := host.n.Lotus.StateLookupID(ctx, res.PaymentAddress, types.EmptyTSK)
+	if err != nil {
+		return ProviderResponse{}, err
+	}
+	return ProviderResponse{
+		res,
+		fp.ID(),
+		idaddr,
+	}, nil
 }
 
 func runApiServer(shutdownCh <-chan struct{}) error {
