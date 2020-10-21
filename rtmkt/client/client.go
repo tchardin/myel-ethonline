@@ -87,7 +87,7 @@ func main() {
 	<-dealFinished
 	// We make an offline api to make sure ipfs doesn't load it directly
 	n.Store.Offline()
-	err = n.Store.GetFile(mcidString)
+	err = n.Store.GetFile(mcidString, "/file")
 	if err != nil {
 		log.Error().Err(err).Msg("Unable to spin up offline ipfs api")
 	}
