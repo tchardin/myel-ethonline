@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"os"
+	"os/signal"
+
 	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-jsonrpc"
 	"github.com/filecoin-project/go-state-types/abi"
@@ -11,9 +15,6 @@ import (
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"net/http"
-	"os"
-	"os/signal"
 
 	rtmkt "github.com/tchardin/myel-ethonline/rtmkt/lib"
 )
@@ -28,38 +29,15 @@ func main() {
 
 type ApiServer struct {
 	n *rtmkt.MyelNode
-	starting bool
-	clientSubscribed bool
-	providerSubscribed bool
-}
-
-func (host *ApiServer) StartNode(ctx context.Context, t rtmkt.NodeType) error {
-	if host.starting || host.n != nil {
-		return nil
-	}
-	host.starting = true
-	var err error
-	host.n, err = rtmkt.SpawnNode(t)
-	if err != nil {
-		log.Error().Err(err).Msg("Unable to spawn myel node")
-		return err
-	}
-	return nil
 }
 
 type ProviderEvent struct {
-	Status string
+	Status        string
 	TotalReceived string
 }
 
 func (host *ApiServer) RegisterProviderEvents(ctx context.Context) (<-chan ProviderEvent, error) {
 	out := make(chan ProviderEvent)
-	if host.providerSubscribed {
-		return out, nil
-	} else {
-		host.providerSubscribed = true
-	}
-
 	host.n.Provider.SubscribeToEvents(func(event rtmkt.ProviderEvent, state rtmkt.ProviderDealState) {
 		log.Info().
 			Str("ProviderEvent", rtmkt.ProviderEvents[event]).
@@ -69,7 +47,7 @@ func (host *ApiServer) RegisterProviderEvents(ctx context.Context) (<-chan Provi
 			Msg("Updating")
 
 		out <- ProviderEvent{
-			Status: rtmkt.DealStatuses[state.Status],
+			Status:        rtmkt.DealStatuses[state.Status],
 			TotalReceived: types.FIL(state.FundsReceived).String(),
 		}
 	})
@@ -79,13 +57,6 @@ func (host *ApiServer) RegisterProviderEvents(ctx context.Context) (<-chan Provi
 
 func (host *ApiServer) RegisterClientEvents(ctx context.Context) (<-chan ClientEvent, error) {
 	out := make(chan ClientEvent)
-	if host.clientSubscribed {
-		return out, nil
-	} else {
-		host.clientSubscribed = true
-	}
-	log.Info().Msg("Registered client events")
-
 	host.n.Client.SubscribeToEvents(func(event rtmkt.ClientEvent, state rtmkt.ClientDealState) {
 		log.Info().
 			Str("ClientEvent", rtmkt.ClientEvents[event]).
@@ -96,7 +67,7 @@ func (host *ApiServer) RegisterClientEvents(ctx context.Context) (<-chan ClientE
 			Str("VoucherShortfall", state.VoucherShortfall.String()).
 			Msg("Updating")
 
-		out<-ClientEvent{
+		out <- ClientEvent{
 			Status:        rtmkt.DealStatuses[state.Status],
 			TotalReceived: state.TotalReceived,
 		}
@@ -141,7 +112,7 @@ type RetrievalOrder struct {
 }
 
 type ClientEvent struct {
-	Status string
+	Status        string
 	TotalReceived uint64
 }
 
@@ -157,7 +128,7 @@ func (host *ApiServer) Retrieve(ctx context.Context, order RetrievalOrder) (<-ch
 			Str("VoucherShortfall", state.VoucherShortfall.String()).
 			Msg("Updating")
 
-		out<-ClientEvent{
+		out <- ClientEvent{
 			Status:        rtmkt.DealStatuses[state.Status],
 			TotalReceived: state.TotalReceived,
 		}
@@ -218,7 +189,7 @@ func (host *ApiServer) QueryDeal(ctx context.Context, m string, pid peer.ID) (rt
 
 type ProviderResponse struct {
 	rtmkt.QueryResponse
-	PeerID peer.ID
+	PeerID    peer.ID
 	IDAddress address.Address
 }
 
@@ -248,11 +219,17 @@ func (host *ApiServer) GetFirstPeer(ctx context.Context, p string) (ProviderResp
 }
 
 func runApiServer(shutdownCh <-chan struct{}) error {
-	serverHandler := &ApiServer{}
+	n, err := rtmkt.SpawnNode(rtmkt.NodeTypeFull)
+	if err != nil {
+		log.Error().Err(err).Msg("Unable to spawn myel node")
+		return err
+	}
+
+	serverHandler := &ApiServer{n}
 	rpcServer := jsonrpc.NewServer()
 	rpcServer.Register("MyelApi", serverHandler)
 
-	http.Handle("/rpc/v0", rpcServer)
+	http.Handle("/", rpcServer)
 	log.Info().Str("port", RPCPort).Msg("Starting RPC")
 
 	srv := &http.Server{

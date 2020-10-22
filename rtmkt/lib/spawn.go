@@ -73,18 +73,6 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 	net := NewFromLibp2pHost(ipfs.node.PeerHost)
 	// Get the Datastore from ipfs
 	ds := ipfs.node.Repo.Datastore()
-	multiDs, err := multistore.NewMultiDstore(ds)
-	if err != nil {
-		return nil, fmt.Errorf("Unable to create multistore: %v", err)
-	}
-	dataTransfer, err := NewDataTransfer(ctx, ipfs.node, ds)
-	if err != nil {
-		return nil, fmt.Errorf("Unable to create graphsync data transfer: %v", err)
-	}
-	err = dataTransfer.Start(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("Unable to start data transfer: %v", err)
-	}
 	memks := wallet.NewMemKeyStore()
 	w, err := wallet.NewWallet(memks)
 	if err != nil {
@@ -105,11 +93,25 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 		lcloser:  lcloser,
 	}
 	if nt == NodeTypeClient || nt == NodeTypeFull {
+		// Create a new namespace for our metadata store
+		nds := namespace.Wrap(ds, datastore.NewKey("/retrieval/client"))
+
+		multiDs, err := multistore.NewMultiDstore(ds)
+		if err != nil {
+			return nil, fmt.Errorf("Unable to create multistore: %v", err)
+		}
+		dataTransfer, err := NewDataTransfer(ctx, ipfs.node, nds)
+		if err != nil {
+			return nil, fmt.Errorf("Unable to create graphsync data transfer: %v", err)
+		}
+		err = dataTransfer.Start(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("Unable to start data transfer: %v", err)
+		}
+
 		if _, err := node.WalletImport("client.private"); err != nil {
 			return nil, err
 		}
-		// Create a new namespace for our metadata store
-		nds := namespace.Wrap(ds, datastore.NewKey("/retrieval/client"))
 		countKey := datastore.NewKey("/retrieval/client/dealcounter")
 		dealCounter := storedcounter.New(ds, countKey)
 		resolver := NewLocalPeerResolver(ds)
@@ -126,11 +128,25 @@ func SpawnNode(nt NodeType) (*MyelNode, error) {
 		}
 	}
 	if nt == NodeTypeProvider || nt == NodeTypeFull {
+		pds := namespace.Wrap(ds, datastore.NewKey("/retrieval/provider"))
+
+		multiDs, err := multistore.NewMultiDstore(pds)
+		if err != nil {
+			return nil, fmt.Errorf("Unable to create multistore: %v", err)
+		}
+		dataTransfer, err := NewDataTransfer(ctx, ipfs.node, pds)
+		if err != nil {
+			return nil, fmt.Errorf("Unable to create graphsync data transfer: %v", err)
+		}
+		err = dataTransfer.Start(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("Unable to start data transfer: %v", err)
+		}
+
 		providerAddress, err := node.WalletImport("provider.private")
 		if err != nil {
 			return nil, err
 		}
-		pds := namespace.Wrap(ds, datastore.NewKey("/retrieval/provider"))
 
 		provider, err := NewProvider(providerAddress, radapter, net, multiDs, ipfs, dataTransfer, pds)
 		if err != nil {
