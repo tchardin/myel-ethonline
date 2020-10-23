@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -11,13 +12,14 @@ import (
 	"path"
 	"strings"
 
+	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-state-types/abi"
-	"github.com/filecoin-project/go-state-types/crypto"
 	lapi "github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/api/client"
 	"github.com/filecoin-project/lotus/chain/types"
 	"github.com/filecoin-project/lotus/chain/wallet"
 	_ "github.com/filecoin-project/lotus/lib/sigs/bls"
+	_ "github.com/filecoin-project/lotus/lib/sigs/secp"
 	"github.com/urfave/cli/v2"
 )
 
@@ -38,7 +40,7 @@ func main() {
 		},
 	}
 	app.Action = func(cctx *cli.Context) error {
-		ctx := context.Background()
+		ctx := cctx.Context
 
 		memks := wallet.NewMemKeyStore()
 		w, err := wallet.NewWallet(memks)
@@ -46,12 +48,12 @@ func main() {
 			return err
 		}
 
-		var kt crypto.SigType
+		var kt types.KeyType
 		switch cctx.String("type") {
 		case "bls":
-			kt = crypto.SigTypeBLS
+			kt = types.KTBLS
 		case "secp256k1":
-			kt = crypto.SigTypeSecp256k1
+			kt = types.KTSecp256k1
 		default:
 			return fmt.Errorf("unrecognized key type: %q", cctx.String("type"))
 		}
@@ -81,29 +83,15 @@ func main() {
 
 		fmt.Println("Generated new key: ", kaddr)
 
-		wd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("Unable to get current directory: %v", err)
-		}
-		fdata, err := ioutil.ReadFile(path.Join(wd, "client.private"))
-		if err != nil {
-			return fmt.Errorf("Unable to import private key file: %v", err)
-		}
-		var iki types.KeyInfo
-		data, err := hex.DecodeString(strings.TrimSpace(string(fdata)))
-		if err != nil {
-			return fmt.Errorf("Unable to decode hex string: %v", err)
-		}
-		if err := json.Unmarshal(data, &iki); err != nil {
-			return fmt.Errorf("Unable to unmarshal keyinfo: %v", err)
-		}
-		addr, err := w.WalletImport(ctx, &iki)
+		caddr, err := importKey(ctx, w, "client.private")
 
-		fmt.Println("Imported new key: ", addr)
+		tok := "1jEi5k8tA7BuECNtOxLVwh5bL69:6c4922aaaa50d95bb0e69fb07289ee1a"
+		etok := base64.StdEncoding.EncodeToString([]byte(tok))
 
-		api, closer, err := client.NewFullNodeRPC(ctx, "ws://35.184.58.104:8080/rpc/v0", http.Header{
+		api, closer, err := client.NewFullNodeRPC(ctx, "wss://filecoin.infura.io", http.Header{
 			// This token can write msgs to mempool but not sign them
-			"Authorization": []string{fmt.Sprintf("Bearer %s", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJBbGxvdyI6WyJyZWFkIiwid3JpdGUiXX0.K7gSaQ4WchdDktdsC0yiLTPKL1fwxTAciLgEO6zuW8g")},
+			// "Authorization": []string{fmt.Sprintf("Bearer %s", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJBbGxvdyI6WyJyZWFkIiwid3JpdGUiXX0.K7gSaQ4WchdDktdsC0yiLTPKL1fwxTAciLgEO6zuW8g")},
+			"Authorization": []string{fmt.Sprintf("Basic %s", etok)},
 		})
 		defer func() {
 			closer()
@@ -117,7 +105,7 @@ func main() {
 
 		method := abi.MethodNum(uint64(0))
 		msg := &types.Message{
-			From:   addr,
+			From:   caddr,
 			To:     kaddr,
 			Value:  types.BigInt(val),
 			Method: method,
@@ -158,4 +146,29 @@ func main() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
+}
+
+func importKey(ctx context.Context, w *wallet.LocalWallet, name string) (address.Address, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return address.Undef, fmt.Errorf("Unable to get current directory: %v", err)
+	}
+	fdata, err := ioutil.ReadFile(path.Join(wd, "client.private"))
+	if err != nil {
+		return address.Undef, fmt.Errorf("Unable to import private key file: %v", err)
+	}
+	var iki types.KeyInfo
+	data, err := hex.DecodeString(strings.TrimSpace(string(fdata)))
+	if err != nil {
+		return address.Undef, fmt.Errorf("Unable to decode hex string: %v", err)
+	}
+	if err := json.Unmarshal(data, &iki); err != nil {
+		return address.Undef, fmt.Errorf("Unable to unmarshal keyinfo: %v", err)
+	}
+	addr, err := w.WalletImport(ctx, &iki)
+
+	fmt.Println("Imported new key: ", addr)
+
+	return addr, nil
+
 }

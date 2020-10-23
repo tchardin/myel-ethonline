@@ -43,7 +43,7 @@ const noEvent = ClientEvent(math.MaxUint64)
 
 func clientEvent(event datatransfer.Event, channelState datatransfer.ChannelState) (ClientEvent, []interface{}) {
 	switch event.Code {
-	case datatransfer.Progress:
+	case datatransfer.DataReceived:
 		return ClientEventBlocksReceived, []interface{}{channelState.Received()}
 	case datatransfer.FinishTransfer:
 		return ClientEventAllBlocksReceived, nil

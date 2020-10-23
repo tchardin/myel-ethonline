@@ -2,6 +2,7 @@ package rtmkt
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -55,10 +56,14 @@ func (mn *MyelNode) Close() {
 
 func SpawnNode(nt NodeType) (*MyelNode, error) {
 	ctx := context.Background()
+
+	tok := "1jEi5k8tA7BuECNtOxLVwh5bL69:6c4922aaaa50d95bb0e69fb07289ee1a"
+	etok := base64.StdEncoding.EncodeToString([]byte(tok))
+
 	// Establish connection with a remote (or local) lotus node
-	lapi, lcloser, err := lclient.NewFullNodeRPC(ctx, "ws://35.184.58.104:8080/rpc/v0", http.Header{
-		// This token can write msgs to mempool but not sign them
-		"Authorization": []string{fmt.Sprintf("Bearer %s", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJBbGxvdyI6WyJyZWFkIiwid3JpdGUiXX0.K7gSaQ4WchdDktdsC0yiLTPKL1fwxTAciLgEO6zuW8g")},
+	lapi, lcloser, err := lclient.NewFullNodeRPC(ctx, "wss://filecoin.infura.io", http.Header{
+		// Provide a write token if you're running your own lotus
+		"Authorization": []string{fmt.Sprintf("Basic %s", etok)},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("Unable to start lotus rpc: %v", err)
