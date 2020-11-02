@@ -1,3 +1,5 @@
+_**Note**: this project is now developed [here](https://github.com/myelnet/go-myel-network)_
+
 # Myel | ETHOnline
 
 We started this repo to separate development during ETHOnline hackathon. We have a developed a
